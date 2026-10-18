@@ -1,0 +1,6 @@
+# per-machine config written by install.ps1
+config.ini
+
+# runtime logs
+logs/
+*.log
