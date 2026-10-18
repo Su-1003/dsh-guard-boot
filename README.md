@@ -2,7 +2,6 @@
 
 ![dsh-guard-boot](assets/logo-180.png)
 
-# dsh-guard-boot
 
 # dsh-guard-boot
 
