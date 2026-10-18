@@ -1,5 +1,8 @@
 <div align="center">
-  <img src="https://raw.githubusercontent.com/Su-1003/dsh-guard-boot/main/assets/logo.png" width="132" alt="dsh-guard-boot">
+
+![dsh-guard-boot](assets/logo-180.png)
+
+# dsh-guard-boot
 
 # dsh-guard-boot
 
