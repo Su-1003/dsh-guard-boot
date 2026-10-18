@@ -114,6 +114,8 @@ else { Write-Step ('WARN: profile not found or incomplete (' + $copied + ' files
 
 # ---- 4. desktop shortcut ----
 $vbs = Join-Path $ScriptDir 'start-dsh.vbs'
+$ico = Join-Path $ScriptDir 'assets\logo.ico'
+if (Test-Path $ico) { $iconLoc = $ico + ',0' } else { $iconLoc = $ExePath + ',0' }
 if (-not $NoShortcut) {
     $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) ($ShortcutName + '.lnk')
     $wsh = New-Object -ComObject WScript.Shell
@@ -121,7 +123,7 @@ if (-not $NoShortcut) {
     $s.TargetPath       = (Join-Path $env:SystemRoot 'System32\wscript.exe')
     $s.Arguments        = '"' + $vbs + '"'
     $s.WorkingDirectory = $ScriptDir
-    $s.IconLocation     = $ExePath + ',0'
+    $s.IconLocation     = $iconLoc
     $s.WindowStyle      = 1
     $s.Description      = 'DeepSeek Harness (boot guard: snapshot + auto rollback)'
     $s.Save()

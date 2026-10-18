@@ -1,8 +1,25 @@
+<div align="center">
+  <img src="assets/logo.png" width="132" alt="dsh-guard-boot">
+
 # dsh-guard-boot
 
-给 **DeepSeek Harness 桌面版（Windows）** 用的一层启动保险：**启动路径上不加等待**，旁边挂一个看门狗，发现启动失败就自动回滚配置并重启。
+<p>给 <b>DeepSeek Harness 桌面版（Windows）</b> 用的一层启动保险：<br>
+启动路径上不加等待，旁边挂一个看门狗 —— 发现启动失败，自动回滚配置并重新拉起。</p>
 
-> 它**不是插件**。它完全住在 DSH 外面——不写 profile，不进 bundle 名册，不参与 boot。DSH 崩了它还在。
+<p>
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-2ea043?style=flat-square">
+  <img alt="dependencies" src="https://img.shields.io/badge/dependencies-none-2ea043?style=flat-square">
+  <img alt="build step" src="https://img.shields.io/badge/build%20step-none-8b949e?style=flat-square">
+  <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square">
+  <img alt="powershell" src="https://img.shields.io/badge/powershell-5.1%2B-5391FE?style=flat-square">
+  <img alt="tested on" src="https://img.shields.io/badge/tested%20on-DSH%200.2.1--rc.2-1f6feb?style=flat-square">
+</p>
+
+<p><sub><b>简体中文</b> · <a href="#english">English</a></sub></p>
+
+</div>
+
+> 它**不是插件**。它完全住在 DSH 外面 —— 不写 profile，不进 bundle 名册，不参与 boot。DSH 崩了它还在。
 
 ## 获取
 
@@ -11,7 +28,7 @@ git clone https://github.com/Su-1003/dsh-guard-boot.git
 cd dsh-guard-boot
 ```
 
-没有 git 就下 [zip](https://github.com/Su-1003/dsh-guard-boot/archive/refs/heads/main.zip) 解压，效果一样——它只是个文件夹，没有依赖、不用 `npm install`。
+没有 git 就下 [zip](https://github.com/Su-1003/dsh-guard-boot/archive/refs/heads/main.zip) 解压，效果一样 —— 它只是个文件夹，没有依赖、不用 `npm install`。
 
 ## 为什么不在 DSH 里做
 
@@ -25,11 +42,12 @@ cd dsh-guard-boot
 
 ## 它做什么
 
-1. 双击快捷方式 → 立刻拉起 `DeepSeek Harness.exe`（与原生双击等价）
-2. 同时以隐藏窗口启动 `watchdog.ps1`
-3. 看门狗等 20 秒，比对 `%APPDATA%\@deepseek-ai\dsh-desktop\logs` 里的 `crash-*.log`：
-   - **没有新日志** → 把当前 5 个配置文件存成 `last-good`，退出
-   - **有新日志** → 杀进程 → 从 `last-good` 拷回 5 个文件 → 重启 → 弹窗告知
+| 场景 | 看门狗看到什么 | 它做什么 |
+|---|---|---|
+| 正常启动 | 20 秒内没有新的 `crash-*.log` | 把当前 5 个配置存成 `last-good`，安静退出 |
+| 启动被配置/插件拖垮 | 出现新的 `crash-*.log` | 杀进程 → 回滚 5 个文件 → 重新拉起 → 弹窗告知 |
+| 连快照都写不出来 | 快照得到 0 个文件 | 记一行日志就退出，**不碰你的任何文件**（fail-open） |
+| 进程根本没起来 | 进程数为 0 | **不刷新 `last-good`**，防止坏配置被认证成好配置 |
 
 判据只看崩溃日志，**不看进程存活**：`web boot` 失败时进程是活得好好的，只有日志是新的。
 
@@ -49,6 +67,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -ExePath "D:\a
 
 之后日常用桌面上的 **DSH（守护启动）** 图标启动；原来的 `DeepSeek Harness` 图标保持不动，随时可以回退。
 
+> 快捷方式默认名是 `DSH (guarded)`，想改成自己的名字：`-ShortcutName "DSH（守护启动）"`。图标默认用 `assets/logo.ico`，删掉该文件则回退到 exe 自带图标。
+
 ## 配置（`config.ini`）
 
 ```ini
@@ -67,16 +87,17 @@ WaitSeconds=20
 | `start-dsh.vbs` | 双击入口。先起 exe，再隐藏起看门狗 |
 | `watchdog.ps1` | 快照、判定、回滚 |
 | `config.ini` | 由 install.ps1 生成，可手改 |
+| `assets/logo.ico` | 快捷方式图标（install.ps1 优先用它） |
+| `assets/logo.png` | 仓库头像 / 文档用图（`assets/make-logo.py` 用 Pillow 生成） |
 
 快照目录：`%USERPROFILE%\.dsh\boot-snapshots\`（`last-good\` 一份 + 最多 5 份 `pre-boot-*\`，合计约 1 MB）
 日志目录：`logs\`（每次启动一份 `watchdog-<时间戳>.log`）
 
 ## 边界（老实说）
 
-- **只救配置层**：插件/配置把启动弄坏这一类。exe 损坏、asar 被覆盖、磁盘满、端口被占——回滚配置没用，但它会在日志里写清楚。
+- **只救配置层**：插件/配置把启动弄坏这一类。exe 损坏、asar 被覆盖、磁盘满、端口被占 —— 回滚配置没用，但它会在日志里写清楚。
 - **只在那 20 秒窗口里看一次**：运行中闪退、用一半 OOM 崩溃，它不知道。
 - **只认崩溃日志**：如果某种失败模式不写 `crash-*.log`，它会误判为健康。
-- **进程数为 0 时不刷新 `last-good`**：没被真正跑通的配置不允许被认证成"好"，否则坏配置会污染回滚源。
 - **只在从该快捷方式启动时生效**：从开始菜单或命令行启动 DSH 不会有保护。
 
 ## 演练
@@ -99,6 +120,17 @@ $ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 ## 卸载
 
 删掉快捷方式即可；本目录与 `%USERPROFILE%\.dsh\boot-snapshots\` 都是纯文件，随时可删，DSH 本身不受影响。
+
+## English
+
+A sidecar boot guard for **DeepSeek Harness (desktop, Windows)**. Double-clicking the launcher starts the app immediately and fires a hidden watchdog alongside it:
+
+- 20 s after launch, if no new `crash-*.log` appeared → snapshot the five profile config files as `last-good`, exit quietly.
+- if a new crash log appeared → kill the app, restore those files from `last-good`, relaunch, show a dialog.
+
+It deliberately lives **outside** DSH: no plugin, no profile entry, nothing loaded by boot. A guard that ships as a plugin dies together with the thing it guards — that is exactly how the incident that motivated this tool played out.
+
+Install with `install.ps1`, configure via `config.ini`, uninstall by deleting the shortcut. MIT.
 
 ## 许可
 
