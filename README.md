@@ -4,6 +4,15 @@
 
 > 它**不是插件**。它完全住在 DSH 外面——不写 profile，不进 bundle 名册，不参与 boot。DSH 崩了它还在。
 
+## 获取
+
+```powershell
+git clone https://github.com/Su-1003/dsh-guard-boot.git
+cd dsh-guard-boot
+```
+
+没有 git 就下 [zip](https://github.com/Su-1003/dsh-guard-boot/archive/refs/heads/main.zip) 解压，效果一样——它只是个文件夹，没有依赖、不用 `npm install`。
+
 ## 为什么不在 DSH 里做
 
 因为「守门人不能住在门里」。真实经历：
@@ -38,7 +47,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -ExePath "D:\apps\DeepSeek Harness\DeepSeek Harness.exe"
 ```
 
-之后日常用桌面上的 **DSH (guarded)** 图标启动。
+之后日常用桌面上的 **DSH（守护启动）** 图标启动；原来的 `DeepSeek Harness` 图标保持不动，随时可以回退。
 
 ## 配置（`config.ini`）
 
