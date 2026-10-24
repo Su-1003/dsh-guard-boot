@@ -24,7 +24,7 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
-$SnapFiles = @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml')
+$SnapFiles = @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml','compatibility.json')
 $KeepSnapshots = 5
 
 # ---------- 配置来源：命令行 > config.ini > 自动发现 ----------
