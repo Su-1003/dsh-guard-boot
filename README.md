@@ -14,7 +14,7 @@
   <img alt="build step" src="https://img.shields.io/badge/build%20step-none-8b949e?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows-0078d4?style=flat-square">
   <img alt="powershell" src="https://img.shields.io/badge/powershell-5.1%2B-5391FE?style=flat-square">
-  <img alt="tested on" src="https://img.shields.io/badge/tested%20on-DSH%200.2.1--rc.2-1f6feb?style=flat-square">
+  <img alt="tested on" src="https://img.shields.io/badge/tested%20on-DSH%200.2.1--rc.3-1f6feb?style=flat-square">
 </p>
 
 <p><sub><b>简体中文</b> · <a href="#english">English</a></sub></p>
@@ -118,6 +118,7 @@ WaitSeconds=20
 - **只在那 20 秒窗口里看一次**：运行中闪退、用一半 OOM 崩溃，它不知道。
 - **只认崩溃日志**：如果某种失败模式不写 `crash-*.log`，它会误判为健康。
 - **只在从该快捷方式启动时生效**：从开始菜单或命令行启动 DSH 不会有保护。
+- **重复双击不会污染 last-good**：判定只认「启动后 15 秒内新出现的进程」，已经在跑的旧实例不算数，所以"其实没启动成功"的那次不会把配置认证成 good。
 
 ## 演练
 

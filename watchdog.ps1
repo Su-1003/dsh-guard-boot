@@ -26,6 +26,8 @@ param(
 $ErrorActionPreference = 'Continue'
 $SnapFiles = @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml','compatibility.json')
 $KeepSnapshots = 5
+# 判定「本次启动是否真的跑起来」的时间容差：exe 由 vbs 先拉起，看门狗晚几百毫秒
+$GraceSeconds = 15
 
 # ---------- 配置来源：命令行 > config.ini > 自动发现 ----------
 $ScriptDir = $PSScriptRoot
@@ -147,6 +149,15 @@ function Restore-ConfigSnapshot {
     return $n
 }
 
+function Prune-OldSnapshots {
+    $olds = @(Get-ChildItem -LiteralPath $SnapshotRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like 'pre-boot-*' } | Sort-Object Name -Descending | Select-Object -Skip $KeepSnapshots)
+    foreach ($o in $olds) {
+        Remove-Item -LiteralPath $o.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log ('pruned: ' + $o.Name)
+    }
+}
+
 function Show-Notice {
     param([string]$text, [int]$icon)
     try {
@@ -199,8 +210,15 @@ try {
         $newLogs = @(Get-ChildItem -LiteralPath $CrashLogDir -Filter 'crash-*.log' -File -ErrorAction SilentlyContinue |
             Where-Object { (-not $baseline.ContainsKey($_.Name)) -or ($_.LastWriteTime -gt $started) })
     }
-    $procAlive = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue).Count
-    Write-Log ('check: new-crash-logs=' + $newLogs.Count + '  running-processes=' + $procAlive)
+    # 只认「本次启动」新出现的进程：重复双击图标时那个一直在跑的旧实例不算数，
+    # 否则一份根本没启动过的配置会被认证成 last-good。按开始时间判定，
+    # 避开 start-dsh.vbs「先起 exe、再起看门狗」的先后抢跑。
+    $freshAt = $started.AddSeconds(-$GraceSeconds)
+    $procAlive = 0
+    foreach ($p in @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {
+        try { if ($p.StartTime -ge $freshAt) { $procAlive++ } } catch { $procAlive++ }
+    }
+    Write-Log ('check: new-crash-logs=' + $newLogs.Count + '  fresh-processes=' + $procAlive + ' (started within ' + $GraceSeconds + 's of launch)')
 
     if ($newLogs.Count -eq 0) {
         # ---- 健康：把这份快照提升为 last-good ----
@@ -212,16 +230,11 @@ try {
             Copy-ConfigSnapshot -src $preDir -dst $goodDir
             Write-Log ('OK: refreshed last-good -> ' + $goodDir)
 
-            # 修剪旧 pre-boot（只留最近 $KeepSnapshots 份）
-            $olds = @(Get-ChildItem -LiteralPath $SnapshotRoot -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like 'pre-boot-*' } | Sort-Object Name -Descending | Select-Object -Skip $KeepSnapshots)
-            foreach ($o in $olds) {
-                Remove-Item -LiteralPath $o.FullName -Recurse -Force -ErrorAction SilentlyContinue
-                Write-Log ('pruned: ' + $o.Name)
-            }
         } else {
-            Write-Log ('SKIP: no running process named "' + $ProcessName + '" - not certifying this config as last-good')
+            Write-Log ('SKIP: no fresh process named "' + $ProcessName + '" - not certifying this config as last-good')
         }
+        # 不管这次健康与否都修剪，否则连续失败会让 pre-boot 无限堆积
+        Prune-OldSnapshots
         Write-Log '=== watchdog end (healthy) ==='
         exit 0
     }
@@ -266,6 +279,7 @@ try {
     if (-not $NoNotice) {
         Show-Notice ("DSH failed to start. Config rolled back and relaunched.`n`nCrash log: " + ($newLogs[0].Name) + "`nRestored from: " + $restoreFrom + "`n`nDetails: " + $logFile) 48
     }
+    Prune-OldSnapshots
     Write-Log '=== watchdog end (rolled back) ==='
     exit 1
 }
