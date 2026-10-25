@@ -57,7 +57,7 @@ cd dsh-guard-boot
 ## 快照与回滚点
 
 每次从图标启动都先拍一份 `pre-boot-<时间戳>`（保留最近 5 份，旧的自动删）；20 秒内没崩、且窗口真的出现，再把当前配置刷成 `last-good`。
-回滚时另存的 `pre-rollback-<时间戳>` 保留最近 10 份；`logs\` 里超过 90 天的 `watchdog-*.log` 也会自动清掉。
+回滚时另存的 `pre-rollback-<时间戳>` 与 `restore.ps1` 留下的 `pre-restore-<时间戳>` 都保留最近 10 份；`logs\` 里超过 90 天的 `watchdog-*.log` 也会自动清掉。
 
 回滚**不按时间挑**，用的永远是 `last-good` —— 也就是「**上一次启动成功的配置**」。这点很关键：失败的那次启动不会刷新它（进程数为 0 时更是直接跳过），所以回滚点不会退化成那份坏配置。
 
@@ -108,13 +108,13 @@ WaitSeconds=20
 | `start-dsh.vbs` | 双击入口。先跑 cookie 体检，再起 exe，最后隐藏起看门狗 |
 | `watchdog.ps1` | 快照、判定、回滚 |
 | `preflight.ps1` | 启动前的 cookie 体检（只在 exe 起来之前读得到那个库） |
-| `test.ps1` | 回归测试：18 组用例、65 条断言，改完跑一遍 |
+| `test.ps1` | 回归测试：23 组用例、81 条断言，改完跑一遍 |
 | `restore.ps1` | 手动把某一份快照恢复到 profile（`last-good` / 任意 `pre-boot-*` / 绝对路径） |
 | `config.ini` | 由 install.ps1 生成，可手改 |
 | `assets/logo.ico` | 快捷方式图标（install.ps1 优先用它） |
 | `assets/logo.png` | 仓库头像 / 文档用图（`assets/make-logo.py` 用 Pillow 生成） |
 
-快照目录：`%USERPROFILE%\.dsh\boot-snapshots\`（`last-good\` 一份 + 最多 5 份 `pre-boot-*\` + 最多 10 份 `pre-rollback-*\`，合计约 1 MB）
+快照目录：`%USERPROFILE%\.dsh\boot-snapshots\`（`last-good\` 一份 + 最多 5 份 `pre-boot-*\` + 最多 10 份 `pre-rollback-*\` + 最多 10 份 `pre-restore-*\`，合计约 1 MB）
 日志目录：`logs\`（每次启动一份 `watchdog-<时间戳>.log`，超过 90 天自动清理）
 
 ### 启动耗时
@@ -212,9 +212,9 @@ $ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 & $ps5 -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 ```
 
-- 18 组用例、65 条断言，全过退出码 `0`，有一条红就 `1`
+- 23 组用例、81 条断言，全过退出码 `0`，有一条红就 `1`
 - 每组都在 `%TEMP%\dsh-guard-test-<时间戳>\` 下造独立沙箱（自带一份 profile 副本），**不碰 `~\.dsh`、不碰真实 `last-good`**，全程 `-NoNotice` 不弹框
-- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 卡死计数不被健康路径误清 / **回滚前先释放锁**（含日志顺序断言）/ `restore.ps1` 的恢复、拒绝、找不到、列表、`-Prune`
+- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 抢锁是原子的（`CreateNew`）/ 卡死计数不被健康路径误清 / **回滚前先释放锁**（含日志顺序断言）/ `restore.ps1` 的恢复、拒绝、找不到、列表、`-Prune` / `preflight.ps1` 的计数、告警节流、涨到阈值再提醒、超线后拒绝清理（`-NoPopup` 下不删任何文件）
 - 可选参数：`-Filter g` 只跑名字含 g 的用例，`-Keep` 保留沙箱供排查
 
 ## 卸载

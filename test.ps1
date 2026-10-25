@@ -24,6 +24,7 @@ $ErrorActionPreference = 'Stop'
 $Here     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Watchdog = Join-Path $Here 'watchdog.ps1'
 $Restore  = Join-Path $Here 'restore.ps1'
+$Preflight = Join-Path $Here 'preflight.ps1'
 $Ps51     = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $RealProfile = Join-Path $env:USERPROFILE '.dsh\profiles\desktop'
 
@@ -131,6 +132,37 @@ function Invoke-Restore {
     $out = & $Ps51 @a 2>$null
     return @{ code = $LASTEXITCODE; out = (($out | Out-String).Trim()) }
 }
+function Invoke-Preflight {
+    param(
+        [string]$Dir,
+        [int]$Cookies = 0,
+        [hashtable]$Extra = @{}
+    )
+    $cookieDir = Join-Path $Dir 'net'
+    if (-not (Test-Path -LiteralPath $cookieDir)) { New-Item -ItemType Directory -Path $cookieDir -Force | Out-Null }
+    $db = Join-Path $cookieDir 'Cookies'
+    # 故意写成非 sqlite 的字节流：node:sqlite 打不开会自动退回字节扫描（method=byte-scan）
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('SQLite format 3')
+    for ($i = 1; $i -le $Cookies; $i++) { [void]$sb.Append(' dsh-auth-c' + $i + ' ') }
+    [System.IO.File]::WriteAllText($db, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+
+    $a = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Preflight,
+        '-CookieDir', $cookieDir,
+        '-LogDir',    (Join-Path $Dir 'logs'),
+        '-NoPopup'
+    )
+    foreach ($k in $Extra.Keys) {
+        $a += ('-' + $k)
+        if ($Extra[$k] -ne $true) { $a += [string]$Extra[$k] }
+    }
+    $out = & $Ps51 @a 2>$null
+    $logFile = Get-ChildItem -LiteralPath (Join-Path $Dir 'logs') -Filter 'preflight-*.log' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $logText = ''
+    if ($logFile) { $logText = (Get-Content -LiteralPath $logFile.FullName -ErrorAction SilentlyContinue) -join "`n" }
+    return @{ code = $LASTEXITCODE; log = $logText; stateFile = (Join-Path (Join-Path $Dir 'logs') 'preflight-state.json'); db = $db }
+}
 function Get-WatchdogLog([string]$Dir) {
     $f = Get-ChildItem -LiteralPath (Join-Path $Dir 'logs') -Filter 'watchdog-*.log' -ErrorAction SilentlyContinue |
          Sort-Object LastWriteTime | Select-Object -Last 1
@@ -222,15 +254,61 @@ $cases = [ordered]@{
             $p = Join-Path $d ('snap\pre-rollback-2026010' + $i + '-000000')
             New-Item -ItemType Directory -Path $p -Force | Out-Null
             Set-Content -LiteralPath (Join-Path $p 'package.json') -Value '{}' -Encoding UTF8
+        }        for ($i = 1; $i -le 12; $i++) {
+            $p = Join-Path $d ('snap\pre-restore-2026010' + $i + '-000000')
+            New-Item -ItemType Directory -Path $p -Force | Out-Null
+            Set-Content -LiteralPath (Join-Path $p 'package.json') -Value '{}' -Encoding UTF8
         }
         $proc = New-FreshProcess 'testF'
         Start-Sleep -Seconds 2
         $null = Invoke-Watchdog -Dir $d
         Assert 'f pre-boot pruned to 5'  ((Count-Dirs (Join-Path $d 'snap') 'pre-boot-*') -eq 5)  ('got ' + (Count-Dirs (Join-Path $d 'snap') 'pre-boot-*'))
         Assert 'f pre-rollback pruned to 10' ((Count-Dirs (Join-Path $d 'snap') 'pre-rollback-*') -eq 10) ('got ' + (Count-Dirs (Join-Path $d 'snap') 'pre-rollback-*'))
+        Assert 'f pre-restore pruned to 10'  ((Count-Dirs (Join-Path $d 'snap') 'pre-restore-*')  -eq 10) ('got ' + (Count-Dirs (Join-Path $d 'snap') 'pre-restore-*'))
         Stop-FreshProcess $proc
     }
 
+    'p1-preflight-quiet' = {
+        $d = New-Case 'p1-preflight-quiet'
+        $r = Invoke-Preflight -Dir $d -Cookies 3
+        Assert 'p1 exit 0'           ($r.code -eq 0) ('code=' + $r.code)
+        Assert 'p1 counts 3'         ($r.log -match 'auth-cookies=3') $r.log
+        Assert 'p1 byte-scan used'   ($r.log -match 'byte-scan') $r.log
+        Assert 'p1 no popup'         ($r.log -notmatch 'popup suppressed') $r.log
+    }
+
+    'p2-preflight-warn-first' = {
+        $d = New-Case 'p2-preflight-warn-first'
+        $r = Invoke-Preflight -Dir $d -Cookies 20
+        Assert 'p2 warns once'       ($r.log -match 'popup suppressed') $r.log
+        Assert 'p2 state written'    ($r.log -match 'warned and state updated \(20\)') $r.log
+        Assert 'p2 state file'       (Test-Path -LiteralPath $r.stateFile) $r.stateFile
+    }
+
+    'p3-preflight-throttled' = {
+        $d = New-Case 'p3-preflight-throttled'
+        $null = Invoke-Preflight -Dir $d -Cookies 20
+        $r = Invoke-Preflight -Dir $d -Cookies 20
+        Assert 'p3 throttled'        ($r.log -match 'warn throttled') $r.log
+        Assert 'p3 only one popup'   ((([regex]::Matches($r.log, 'popup suppressed')).Count) -eq 1) ('count=' + (([regex]::Matches($r.log, 'popup suppressed')).Count))
+    }
+
+    'p4-preflight-warn-grew' = {
+        $d = New-Case 'p4-preflight-warn-grew'
+        $null = Invoke-Preflight -Dir $d -Cookies 20
+        $r = Invoke-Preflight -Dir $d -Cookies 30
+        Assert 'p4 warns again'      ((([regex]::Matches($r.log, 'popup suppressed')).Count) -eq 2) ('count=' + (([regex]::Matches($r.log, 'popup suppressed')).Count))
+    }
+
+    'p5-preflight-clean-declined' = {
+        $d = New-Case 'p5-preflight-clean-declined'
+        $r = Invoke-Preflight -Dir $d -Cookies 40 -Extra @{ CleanCount = 30 }
+        Assert 'p5 sees 40'          ($r.log -match 'auth-cookies=40') $r.log
+        Assert 'p5 asks clean'       ($r.log -match 'popup suppressed') $r.log
+        Assert 'p5 declined'         ($r.log -match 'user declined cleaning') $r.log
+        Assert 'p5 db kept'          (Test-Path -LiteralPath $r.db) $r.db
+        Assert 'p5 nothing deleted'  ($r.log -notmatch 'deleted whole cookie db') $r.log
+    }
     'g-old-logs-healthy' = {
         $d = New-Case 'g-old-logs-healthy'
         for ($i = 1; $i -le 3; $i++) {

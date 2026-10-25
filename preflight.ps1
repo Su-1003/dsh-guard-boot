@@ -15,6 +15,7 @@ param(
     [int]$WarnCount     = 15,
     [int]$CleanCount    = 30,
     [switch]$Quiet,
+    [switch]$NoPopup,
     [string]$LogDir     = '',
     [int]$RemindGap     = 10,
     [string]$StateFile  = ''
@@ -42,6 +43,12 @@ function Write-PLog {
 
 function Show-Popup {
     param([string]$text, [int]$icon, [int]$timeout)
+    # -NoPopup：只写日志、不弹窗（测试用）。返回 0 等于「用户没点」，
+    # 所以任何需要用户点「是」才执行的动作都不会发生。
+    if ($NoPopup) {
+        Write-PLog ('popup suppressed: ' + (($text -split "`r`n")[0]))
+        return 0
+    }
     try {
         $w = New-Object -ComObject WScript.Shell
         return $w.Popup($text, $timeout, 'DSH 启动前体检', $icon)

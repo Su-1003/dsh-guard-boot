@@ -32,6 +32,8 @@ $SnapFiles = @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml
 $KeepSnapshots = 5
 # 回滚留档（pre-rollback-*）比启动快照值钱，但也不能无限涨
 $KeepPreRollback = 10
+# 手动恢复前留的存档（pre-restore-*）：同样不能无限涨
+$KeepPreRestore = 10
 # 看门狗日志每次启动一个文件，留 90 天足够回溯
 $LogKeepDays = 90
 # 判定「本次启动是否真的跑起来」的时间容差：exe 由 vbs 先拉起，看门狗晚几百毫秒
@@ -213,6 +215,8 @@ function Prune-OldSnapshots {
     Prune-OldDirs -Pattern 'pre-boot-*' -Keep $KeepSnapshots
     # 每次回滚都会留一份 pre-rollback-*：不修剪的话回滚次数多了会一直涨
     Prune-OldDirs -Pattern 'pre-rollback-*' -Keep $KeepPreRollback
+    # restore.ps1 每跑一次就留一份 pre-restore-*，不修剪会一直涨
+    Prune-OldDirs -Pattern 'pre-restore-*' -Keep $KeepPreRestore
     Prune-OldLogs
 }
 
@@ -256,13 +260,51 @@ try {
     Write-Log ('exe     : ' + $ExePath)
 
     # ---- 0. 互斥：双击两次图标只让一个看门狗干活 ----
+    # Test-Path + 写文件不是原子的：两个看门狗可能都看到「没锁」，于是都往下跑。
+    # 所以用 FileMode.CreateNew 抢占 —— 同名文件已存在会直接抛错，抢不到就退出。
     $other = Get-OtherWatchdog
     if ($other -gt 0) {
         Write-Log ('SKIP: another watchdog (pid ' + $other + ') is running')
         Write-Log '=== watchdog end (skipped: another watchdog runs) ==='
         exit 0
     }
-    Set-Content -LiteralPath $LockFile -Value ('pid=' + $PID) -Encoding ASCII
+    $lockTaken = $false
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $fs = [System.IO.File]::Open($LockFile, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try {
+                $bytes = [System.Text.Encoding]::ASCII.GetBytes('pid=' + $PID)
+                $fs.Write($bytes, 0, $bytes.Length)
+                $fs.Flush()
+            } finally {
+                $fs.Close()
+                $fs.Dispose()
+            }
+            $lockTaken = $true
+            break
+        } catch {
+            $other2 = Get-OtherWatchdog
+            if ($other2 -gt 0) {
+                Write-Log ('SKIP: another watchdog (pid ' + $other2 + ') took the lock first')
+                Write-Log '=== watchdog end (skipped: another watchdog runs) ==='
+                exit 0
+            }
+            if ($attempt -eq 1) {
+                # 锁文件在，但里面的 pid 已经死了：清掉，重试一次
+                Write-Log 'stale lock found (owner not alive) - removing and retrying'
+                Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
+                continue
+            }
+            Write-Log ('SKIP: could not create lock: ' + $_.Exception.Message)
+            Write-Log '=== watchdog end (skipped: lock not acquired) ==='
+            exit 0
+        }
+    }
+    if (-not $lockTaken) {
+        Write-Log 'SKIP: lock not acquired'
+        Write-Log '=== watchdog end (skipped: lock not acquired) ==='
+        exit 0
+    }
     Write-Log ('lock    : ' + $LockFile + ' (pid ' + $PID + ')')
 
     # ---- 1. 基线：启动时刻已存在的崩溃日志 ----
