@@ -19,6 +19,7 @@ param(
     [int]$StartupWatchSeconds = 120,
     [switch]$SimulateCrash,
     [switch]$SimulateAuthFail,
+    [switch]$SimulateNoWindow,
     [int]$StopAfterStreak = 2,
     [switch]$NoRelaunch,
     [switch]$KeepProcesses,
@@ -29,6 +30,10 @@ param(
 $ErrorActionPreference = 'Continue'
 $SnapFiles = @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml','compatibility.json')
 $KeepSnapshots = 5
+# 回滚留档（pre-rollback-*）比启动快照值钱，但也不能无限涨
+$KeepPreRollback = 10
+# 看门狗日志每次启动一个文件，留 90 天足够回溯
+$LogKeepDays = 90
 # 判定「本次启动是否真的跑起来」的时间容差：exe 由 vbs 先拉起，看门狗晚几百毫秒
 $GraceSeconds = 15
 
@@ -154,13 +159,32 @@ function Restore-ConfigSnapshot {
     return $n
 }
 
-function Prune-OldSnapshots {
+function Prune-OldDirs {
+    param([string]$Pattern, [int]$Keep)
     $olds = @(Get-ChildItem -LiteralPath $SnapshotRoot -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like 'pre-boot-*' } | Sort-Object Name -Descending | Select-Object -Skip $KeepSnapshots)
+        Where-Object { $_.Name -like $Pattern } | Sort-Object Name -Descending | Select-Object -Skip $Keep)
     foreach ($o in $olds) {
         Remove-Item -LiteralPath $o.FullName -Recurse -Force -ErrorAction SilentlyContinue
         Write-Log ('pruned: ' + $o.Name)
     }
+}
+
+function Prune-OldLogs {
+    if (-not (Test-Path -LiteralPath $LogDir)) { return }
+    $cutoff = (Get-Date).AddDays(-$LogKeepDays)
+    $olds = @(Get-ChildItem -LiteralPath $LogDir -Filter 'watchdog-*.log' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt $cutoff })
+    foreach ($o in $olds) {
+        Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue
+        Write-Log ('pruned log: ' + $o.Name)
+    }
+}
+
+function Prune-OldSnapshots {
+    Prune-OldDirs -Pattern 'pre-boot-*' -Keep $KeepSnapshots
+    # 每次回滚都会留一份 pre-rollback-*：不修剪的话回滚次数多了会一直涨
+    Prune-OldDirs -Pattern 'pre-rollback-*' -Keep $KeepPreRollback
+    Prune-OldLogs
 }
 
 function Get-StartupSeconds {
@@ -263,12 +287,15 @@ try {
     $newLogs = @()
     if (Test-Path $CrashLogDir) {
         $newLogs = @(Get-ChildItem -LiteralPath $CrashLogDir -Filter 'crash-*.log' -File -ErrorAction SilentlyContinue |
-            Where-Object { (-not $baseline.ContainsKey($_.Name)) -or ($_.LastWriteTime -gt $started) })
+            Where-Object { (-not $baseline.ContainsKey($_.Name)) -or ($_.LastWriteTime -gt $crashSince) })
     }
     # 只认「本次启动」新出现的进程：重复双击图标时那个一直在跑的旧实例不算数，
     # 否则一份根本没启动过的配置会被认证成 last-good。按开始时间判定，
     # 避开 start-dsh.vbs「先起 exe、再起看门狗」的先后抢跑。
     $freshAt = $started.AddSeconds(-$GraceSeconds)
+    # 崩溃日志也用同一个容差：exe 比看门狗先起几百毫秒，日志时间戳可能早于 $started，
+    # 只比 $started 会把「刚起就崩」的那一份漏掉。
+    $crashSince = $started.AddSeconds(-$GraceSeconds)
     $procAlive = 0
     foreach ($p in @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {
         try { if ($p.StartTime -ge $freshAt) { $procAlive++ } } catch { $procAlive++ }
@@ -279,26 +306,37 @@ try {
         # ---- 健康：把这份快照提升为 last-good ----
         # 但进程数为 0 时拒绝认证：App 没在跑，这份配置没有被"跑通"验证过，
         # 若它其实是坏的，认证成 last-good 会让下次回滚也退到坏配置。
-        $goodDir = Join-Path $SnapshotRoot 'last-good'
+        # ---- 先等窗口真的出现，再决定认不认这份配置（旧实例不算，见 Get-StartupSeconds）----
+        # 进程活着但没有窗口（卡死型）不能算「跑通」：认成 last-good 后，
+        # 下次真出事回滚就会退到这份卡死的配置。
+        $startupSec = -1
+        $windowSeen = $false
         if ($procAlive -gt 0) {
-            if (Test-Path $goodDir) { Remove-Item -LiteralPath $goodDir -Recurse -Force -ErrorAction SilentlyContinue }
-            Copy-ConfigSnapshot -src $preDir -dst $goodDir
-            Write-Log ('OK: refreshed last-good -> ' + $goodDir)
-
-        } else {
-            Write-Log ('SKIP: no fresh process named "' + $ProcessName + '" - not certifying this config as last-good')
-        }
-
-        # ---- 启动耗时记账：等窗口真的出现（旧实例不算，见 Get-StartupSeconds）----
-        if ($procAlive -gt 0) {
-            $startupSec = Get-StartupSeconds -LaunchAt $started -FreshAt $freshAt -MaxSeconds $StartupWatchSeconds
+            if ($SimulateNoWindow) {
+                Write-Log 'startup: simulated no-window (window wait skipped)'
+            } else {
+                $startupSec = Get-StartupSeconds -LaunchAt $started -FreshAt $freshAt -MaxSeconds $StartupWatchSeconds
+            }
             if ($startupSec -ge 0) {
+                $windowSeen = $true
                 Write-Log ('startup: ' + $startupSec + ' s (window visible)')
             } else {
                 Write-Log ('startup: not observed within ' + $StartupWatchSeconds + ' s (process alive, no window)')
             }
         } else {
             Write-Log 'startup: n/a (no fresh instance from this launch)'
+        }
+
+        $goodDir = Join-Path $SnapshotRoot 'last-good'
+        if ($procAlive -gt 0 -and $windowSeen) {
+            if (Test-Path $goodDir) { Remove-Item -LiteralPath $goodDir -Recurse -Force -ErrorAction SilentlyContinue }
+            Copy-ConfigSnapshot -src $preDir -dst $goodDir
+            Write-Log ('OK: refreshed last-good -> ' + $goodDir)
+
+        } elseif ($procAlive -gt 0) {
+            Write-Log 'SKIP: window never appeared - not certifying this config as last-good'
+        } else {
+            Write-Log ('SKIP: no fresh process named "' + $ProcessName + '" - not certifying this config as last-good')
         }
 
         # 跑起来了 = 上一轮的「连续失败」计数作废
@@ -323,7 +361,7 @@ try {
         if (-not $errLine) {
             $errLine = @($body | Where-Object { $_ -match 'Error|failed|FAILED' }) | Select-Object -First 1
         }
-if (-not $errLine) {
+        if (-not $errLine) {
                 $errLine = @($body | Where-Object { $_ -match 'SIMULATED|web boot:' }) | Select-Object -First 1
             }
             if (-not $errLine) {

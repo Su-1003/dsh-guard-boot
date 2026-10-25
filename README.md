@@ -50,12 +50,14 @@ cd dsh-guard-boot
 | 启动被配置/插件拖垮 | 出现新的 `crash-*.log` | 杀进程 → 回滚 6 个文件 → 重新拉起 → 弹窗告知 |
 | 连快照都写不出来 | 快照得到 0 个文件 | 记一行日志就退出，**不碰你的任何文件**（fail-open） |
 | 进程根本没起来 | 进程数为 0 | **不刷新 `last-good`**，防止坏配置被认证成好配置 |
+| 进程活着但窗口没出现 | 120 秒内没有窗口 | 同样**不刷新**：卡死的配置不算「跑通」 |
 
 判据只看崩溃日志，**不看进程存活**：`web boot` 失败时进程是活得好好的，只有日志是新的。
 
 ## 快照与回滚点
 
-每次从图标启动都先拍一份 `pre-boot-<时间戳>`（保留最近 5 份，旧的自动删）；20 秒内没崩，再把当前配置刷成 `last-good`。
+每次从图标启动都先拍一份 `pre-boot-<时间戳>`（保留最近 5 份，旧的自动删）；20 秒内没崩、且窗口真的出现，再把当前配置刷成 `last-good`。
+回滚时另存的 `pre-rollback-<时间戳>` 保留最近 10 份；`logs\` 里超过 90 天的 `watchdog-*.log` 也会自动清掉。
 
 回滚**不按时间挑**，用的永远是 `last-good` —— 也就是「**上一次启动成功的配置**」。这点很关键：失败的那次启动不会刷新它（进程数为 0 时更是直接跳过），所以回滚点不会退化成那份坏配置。
 
@@ -110,8 +112,8 @@ WaitSeconds=20
 | `assets/logo.ico` | 快捷方式图标（install.ps1 优先用它） |
 | `assets/logo.png` | 仓库头像 / 文档用图（`assets/make-logo.py` 用 Pillow 生成） |
 
-快照目录：`%USERPROFILE%\.dsh\boot-snapshots\`（`last-good\` 一份 + 最多 5 份 `pre-boot-*\`，合计约 1 MB）
-日志目录：`logs\`（每次启动一份 `watchdog-<时间戳>.log`）
+快照目录：`%USERPROFILE%\.dsh\boot-snapshots\`（`last-good\` 一份 + 最多 5 份 `pre-boot-*\` + 最多 10 份 `pre-rollback-*\`，合计约 1 MB）
+日志目录：`logs\`（每次启动一份 `watchdog-<时间戳>.log`，超过 90 天自动清理）
 
 ### 启动耗时
 
@@ -129,7 +131,7 @@ startup: 12 s (window visible)
 | 日志 | 含义 |
 |---|---|
 | `startup: n/a (no fresh instance from this launch)` | 这次没有新进程（重复双击、实例已在跑），没东西可量 |
-| `startup: not observed within 120 s (process alive, no window)` | 进程活着但窗口一直没出来 —— 卡在启动里了，值得看一眼 |
+| `startup: not observed within 120 s (process alive, no window)` | 进程活着但窗口一直没出来 —— 卡在启动里了；**这份配置不会被认证成 `last-good`** |
 
 ### 认得出哪些失败
 
@@ -148,7 +150,8 @@ startup: 12 s (window visible)
 
 `preflight.ps1` 由 `start-dsh.vbs` 在**起 exe 之前**同步调用 —— 那一瞬间 cookie 库还没被 Chromium 锁住，读得到；DSH 一跑起来就连 `FileShare.ReadWrite` 也打不开。
 
-- 数的是 `dsh-auth-*` 的条数（优先用 node 读 sqlite；没有 node 就退回字节扫描，只判量级）
+- 数的是 `dsh-auth-*` 的条数（优先用 node 读 sqlite，**精确计数需要 Node 22+**；没有 node 就退回字节扫描，只判量级）
+- 需要清理时会先备份 `Cookies.bak-<时间戳>`；读不到 sqlite（没 node / 库拒绝）时**兜底整个删掉 `Cookies` 文件**，Chromium 下次启动会重建，代价只是重新登录一次
 - 超过 `-WarnCount`（默认 15）→ 提示一次，不动手
 - 超过 `-CleanCount`（默认 30）→ 弹确认框，点「是」才先备份 `Cookies.bak-<时间戳>` 再清理
 
@@ -178,7 +181,7 @@ $ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
   -SimulateCrash
 ```
 
-`-SimulateCrash` 造一份假崩溃日志逼它走回滚分支。
+`-SimulateCrash` 造一份假崩溃日志逼它走回滚分支，`-SimulateAuthFail` 造认证失败，`-SimulateNoWindow` 模拟「进程活着但窗口不出来」。
 
 ## 卸载
 
@@ -188,7 +191,7 @@ $ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 
 A sidecar boot guard for **DeepSeek Harness (desktop, Windows)**. Double-clicking the launcher starts the app immediately and fires a hidden watchdog alongside it:
 
-- 20 s after launch, if no new `crash-*.log` appeared → snapshot the five profile config files as `last-good`, exit quietly.
+- 20 s after launch, if no new `crash-*.log` appeared and the window actually showed up → snapshot the six profile config files as `last-good`, exit quietly.
 - if a new crash log appeared → kill the app, restore those files from `last-good`, relaunch, show a dialog.
 
 It deliberately lives **outside** DSH: no plugin, no profile entry, nothing loaded by boot. A guard that ships as a plugin dies together with the thing it guards — that is exactly how the incident that motivated this tool played out.

@@ -99,7 +99,7 @@ Write-Step ('config: ' + $iniPath)
 $profileDir = Join-Path $env:USERPROFILE ('.dsh\profiles\' + $ProfileName)
 $snapRoot   = Join-Path $env:USERPROFILE '.dsh\boot-snapshots'
 $goodDir    = Join-Path $snapRoot 'last-good'
-$files = @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml')
+$files = @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml','compatibility.json')
 
 $copied = 0
 if (Test-Path $profileDir) {

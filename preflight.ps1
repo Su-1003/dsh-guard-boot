@@ -143,8 +143,18 @@ try {
             if ($removed -ge 0) {
                 Write-PLog ('cleaned ' + $removed + ' auth cookie(s)')
             } else {
-                Write-PLog 'clean failed (node not available or db refused) - telling the user to delete the file'
-                Show-Popup ("清理没有成功（读不到 node:sqlite）。`r`n`r`n请手动删除这个文件后再启动：`r`n" + $cookies) 48 60 | Out-Null
+                # 兜底：读不到 node:sqlite 时不能把活推回给用户。
+                # 已经备份过，直接整删 Cookies —— Chromium 下次启动会重建，代价是要重新登录。
+                Write-PLog 'clean failed (node not available or db refused) - falling back to deleting the whole file'
+                try {
+                    Remove-Item -LiteralPath $cookies -Force -ErrorAction Stop
+                    Write-PLog ('deleted whole cookie db (backup kept: ' + $backup + ')')
+                    Show-Popup ("清理没有成功（读不到 node:sqlite），已经把整个 Cookies 文件删掉。`r`n`r`n" +
+                                "原文件备份在：`r`n" + $backup + "`r`n`r`nDSH 启动后会重建 cookie，需要重新登录一次。") 64 45 | Out-Null
+                } catch {
+                    Write-PLog ('fallback delete FAILED: ' + $_.Exception.Message)
+                    Show-Popup ("清理没有成功，删除文件也失败了：" + $_.Exception.Message + "`r`n`r`n请手动删除这个文件后再启动：`r`n" + $cookies) 16 60 | Out-Null
+                }
             }
         } else {
             Write-PLog ('user declined cleaning (' + $answer + ')')
