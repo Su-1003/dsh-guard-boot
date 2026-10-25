@@ -127,6 +127,10 @@ if ([string]::IsNullOrWhiteSpace($LogDir))       { $LogDir = Join-Path $ScriptDi
 if ([string]::IsNullOrWhiteSpace($ExePath))      { $ExePath = Find-DshExe }
 # 「同一个崩溃指纹连续失败」的计数文件：健康启动会删掉它
 $StateFile = Join-Path $SnapshotRoot 'fail-streak.json'
+# 「有进程、没窗口」的计数文件：和崩溃计数分开，免得两种故障互相洗掉对方的计数
+$HangFile = Join-Path $SnapshotRoot 'hang-streak.json'
+# 互斥锁：双击两次图标时只允许一个看门狗真正干活
+$LockFile = Join-Path $SnapshotRoot 'watchdog.lock'
 if ([string]::IsNullOrWhiteSpace($ExePath))      { $ExePath = '' }
 
 $logFile = $null
@@ -135,6 +139,31 @@ function Write-Log {
     $line = '[' + (Get-Date -Format 'HH:mm:ss') + '] ' + $msg
     Write-Host $line
     if ($logFile) { try { Add-Content -LiteralPath $logFile -Value $line -Encoding UTF8 } catch {} }
+}
+
+# 另一个看门狗还活着就返回它的 pid，否则返回 0。
+# 判「活着」看两件事：进程在，而且确实是 PowerShell（防止 pid 被别的程序复用）。
+function Get-OtherWatchdog {
+    if (-not (Test-Path -LiteralPath $LockFile)) { return 0 }
+    $raw = Get-Content -LiteralPath $LockFile -Raw -ErrorAction SilentlyContinue
+    if ($raw -notmatch 'pid=(\d+)') { return 0 }
+    $otherPid = [int]$Matches[1]
+    if ($otherPid -le 0 -or $otherPid -eq $PID) { return 0 }
+    $p = Get-Process -Id $otherPid -ErrorAction SilentlyContinue
+    if (-not $p) { return 0 }
+    if ($p.ProcessName -notmatch '^(powershell|pwsh)$') { return 0 }
+    return $otherPid
+}
+
+function Release-Lock {
+    try {
+        if (-not (Test-Path -LiteralPath $LockFile)) { return }
+        $raw = Get-Content -LiteralPath $LockFile -Raw -ErrorAction SilentlyContinue
+        # 只删自己那把锁：别人的锁碰不得
+        if ($raw -match ('pid=' + $PID + '\s*$')) {
+            Remove-Item -LiteralPath $LockFile -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
 }
 
 function Copy-ConfigSnapshot {
@@ -223,6 +252,16 @@ try {
     Write-Log '=== watchdog start ==='
     Write-Log ('profile : ' + $ProfileDir)
     Write-Log ('exe     : ' + $ExePath)
+
+    # ---- 0. 互斥：双击两次图标只让一个看门狗干活 ----
+    $other = Get-OtherWatchdog
+    if ($other -gt 0) {
+        Write-Log ('SKIP: another watchdog (pid ' + $other + ') is running')
+        Write-Log '=== watchdog end (skipped: another watchdog runs) ==='
+        exit 0
+    }
+    Set-Content -LiteralPath $LockFile -Value ('pid=' + $PID) -Encoding ASCII
+    Write-Log ('lock    : ' + $LockFile + ' (pid ' + $PID + ')')
 
     # ---- 1. 基线：启动时刻已存在的崩溃日志 ----
     $baseline = @{}
@@ -334,17 +373,37 @@ try {
             if (Test-Path $goodDir) { Remove-Item -LiteralPath $goodDir -Recurse -Force -ErrorAction SilentlyContinue }
             Copy-ConfigSnapshot -src $preDir -dst $goodDir
             Write-Log ('OK: refreshed last-good -> ' + $goodDir)
+            # 只有「真的认证成功」才算这一轮跑通，才清两种失败计数。
+            # 原先放在健康分支末尾，导致「有进程没窗口」这种卡死也把计数清掉、而且一声不响。
+            if (Test-Path -LiteralPath $StateFile) {
+                Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue
+                Write-Log 'reset: fail-streak cleared'
+            }
+            if (Test-Path -LiteralPath $HangFile) {
+                Remove-Item -LiteralPath $HangFile -Force -ErrorAction SilentlyContinue
+                Write-Log 'reset: hang-streak cleared'
+            }
 
         } elseif ($procAlive -gt 0) {
             Write-Log 'SKIP: window never appeared - not certifying this config as last-good'
+            # 卡死型故障：进程在、窗口一直不出来、也没有崩溃日志。以前这里完全静默，
+            # 现在单独计数，连续两次才提醒一次（也可能只是启动慢，文案里说明）。
+            $hang = 0
+            if (Test-Path -LiteralPath $HangFile) {
+                try {
+                    $h = Get-Content -LiteralPath $HangFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+                    if ($h.count) { $hang = [int]$h.count }
+                } catch {}
+            }
+            $hang++
+            $hangJson = '{"count":' + $hang + ',"at":"' + (Get-Date -Format 's') + '"}'
+            [System.IO.File]::WriteAllText($HangFile, $hangJson, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Log ('HANG: no window again (streak ' + $hang + ')')
+            if ($hang -ge 2 -and -not $NoNotice) {
+                Show-Notice ("DSH 已经连续 " + $hang + " 次「进程起来了、但窗口一直没出现」。`r`n`r`n可能是真卡死，也可能只是启动很慢（超过 " + $StartupWatchSeconds + " 秒还没出窗口）。`r`n`r`n建议：先再等一会儿看窗口会不会出来；始终不出来就完全退出 DSH 再启动一次。`r`n`r`n日志: " + $logFile) 48
+            }
         } else {
             Write-Log ('SKIP: no fresh process named "' + $ProcessName + '" - not certifying this config as last-good')
-        }
-
-        # 跑起来了 = 上一轮的「连续失败」计数作废
-        if (Test-Path -LiteralPath $StateFile) {
-            Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue
-            Write-Log 'reset: fail-streak cleared'
         }
 
         # 不管这次健康与否都修剪，否则连续失败会让 pre-boot 无限堆积
@@ -471,4 +530,8 @@ catch {
     Write-Log ('EXCEPTION: ' + $_.Exception.Message)
     Write-Log ('  at ' + $_.InvocationInfo.ScriptName + ':' + $_.InvocationInfo.ScriptLineNumber)
     exit 0
+}
+finally {
+    # PS 5.1 里 exit 也会跑 finally（已实测），所以锁一定能释放
+    Release-Lock
 }

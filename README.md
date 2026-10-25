@@ -108,6 +108,7 @@ WaitSeconds=20
 | `start-dsh.vbs` | 双击入口。先跑 cookie 体检，再起 exe，最后隐藏起看门狗 |
 | `watchdog.ps1` | 快照、判定、回滚 |
 | `preflight.ps1` | 启动前的 cookie 体检（只在 exe 起来之前读得到那个库） |
+| `test.ps1` | 回归测试：11 组用例、41 条断言，改完跑一遍 |
 | `config.ini` | 由 install.ps1 生成，可手改 |
 | `assets/logo.ico` | 快捷方式图标（install.ps1 优先用它） |
 | `assets/logo.png` | 仓库头像 / 文档用图（`assets/make-logo.py` 用 Pillow 生成） |
@@ -143,8 +144,25 @@ startup: 12 s (window visible)
 | 其它错误（或读不出错误文本） | 备份当前 profile → 回滚 `last-good` → 经 `start-dsh.vbs` 重启，新实例同样带守护 | 1 |
 | 同一个错误连续第 2 次 | **停手**：已经回滚过一次还这样，再来一次也不会好，把原因交给人 | 3 |
 
-「同一个错误」用崩溃日志里第一行 Error 文本做指纹（记在 `fail-streak.json`），健康启动一次就清零。
+「同一个错误」用崩溃日志里第一行 Error 文本做指纹（记在 `fail-streak.json`），**只有真正认证成功的那一次**才清零 —— 窗口没出现、进程没起来这类「没跑通」不算。
 回滚之前，当前那份配置会先另存为 `pre-rollback-<时间戳>\` —— 万一 `last-good` 才是过时的，还有东西可查。
+
+### 卡死型故障（有进程、没窗口）
+
+进程活着、窗口一直不出来、又没写崩溃日志 —— 这种故障以前完全静默。现在它单独计数（`hang-streak.json`，与 `fail-streak.json` 互不干扰）：
+
+- 第一次：只写日志 `HANG: no window again (streak 1)`
+- 连续第二次：弹一次中文提示。文案里会写明**也可能只是启动很慢**（超过 `StartupWatchSeconds` 还没出窗口），所以别把它当成确诊
+- 真的认证成功一次之后，这个计数才清零
+
+### 双击了两次图标
+
+看门狗用 `watchdog.lock`（内容 `pid=<进程号>`）互斥：
+
+- 已有看门狗活着 → 后启动的那个只写一行 `SKIP: another watchdog (pid N) is running` 就退出，**不抢着回滚、不重复重启**
+- 锁里的 pid 已经死了（上次异常退出留下的）→ 直接接管
+- 锁只在进程名前缀是 `powershell` / `pwsh` 时才算数，避免 pid 被别的程序复用造成误判
+- `exit` 也会走 `finally` 释放锁（PS 5.1 实测）
 
 ### 启动前的 cookie 体检
 
@@ -161,6 +179,7 @@ startup: 12 s (window visible)
 
 - **只救配置层**：插件/配置把启动弄坏这一类。exe 损坏、asar 被覆盖、磁盘满、端口被占 —— 回滚配置没用，但它会在日志里写清楚。
 - **只在那 20 秒窗口里看一次**：运行中闪退、用一半 OOM 崩溃，它不知道。
+- **卡死只能提醒，不能自救**：进程活着窗口不出来时，它不会杀进程也不会回滚（分不清是卡死还是慢），只在连续第二次弹一次提示让你决定。
 - **只认崩溃日志**：如果某种失败模式不写 `crash-*.log`，它会误判为健康。日志写了、但里面没有可识别的错误文本时，指纹记成 `unknown failure`，仍然走回滚。
 - **只在从该快捷方式启动时生效**：从开始菜单或命令行启动 DSH 不会有保护。
 - **重复双击不会污染 last-good**：判定只认「启动后 15 秒内新出现的进程」，已经在跑的旧实例不算数，所以"其实没启动成功"的那次不会把配置认证成 good。
@@ -182,6 +201,20 @@ $ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 ```
 
 `-SimulateCrash` 造一份假崩溃日志逼它走回滚分支，`-SimulateAuthFail` 造认证失败，`-SimulateNoWindow` 模拟「进程活着但窗口不出来」。
+
+## 测试
+
+改完 `watchdog.ps1` / `preflight.ps1` 先跑一遍，别靠肉眼：
+
+```powershell
+$ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+& $ps5 -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
+```
+
+- 11 组用例、41 条断言，全过退出码 `0`，有一条红就 `1`
+- 每组都在 `%TEMP%\dsh-guard-test-<时间戳>\` 下造独立沙箱（自带一份 profile 副本），**不碰 `~\.dsh`、不碰真实 `last-good`**，全程 `-NoNotice` 不弹框
+- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 卡死计数不被健康路径误清
+- 可选参数：`-Filter g` 只跑名字含 g 的用例，`-Keep` 保留沙箱供排查
 
 ## 卸载
 
