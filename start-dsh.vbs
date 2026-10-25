@@ -31,12 +31,20 @@ If Not fso.FileExists(exe) Then
     WScript.Quit 2
 End If
 
+ps = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden"
+
+' 0) preflight: count auth cookies BEFORE the app locks its cookie database.
+'    Hidden window and waits (True) - it takes a few hundred ms.
+'    Fail-open: a broken preflight never blocks the launch.
+If fso.FileExists(base & "\preflight.ps1") Then
+    sh.Run ps & " -File """ & base & "\preflight.ps1""", 0, True
+End If
+
 ' 1) start the app
 sh.Run """" & exe & """", 1, False
 
 ' 2) start the watchdog (0 = hidden window, False = do not wait)
-ps = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & base & "\watchdog.ps1"""
-sh.Run ps, 0, False
+sh.Run ps & " -File """ & base & "\watchdog.ps1""", 0, False
 
 Function IniValue(path, key)
     Dim ts, line, i, k

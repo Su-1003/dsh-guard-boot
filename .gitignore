@@ -4,3 +4,5 @@ config.ini
 # runtime logs
 logs/
 *.log
+# 本地备份（改脚本前留的，不进仓库）
+*.bak-*

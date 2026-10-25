@@ -18,6 +18,8 @@ param(
     [int]$WaitSeconds     = -1,
     [int]$StartupWatchSeconds = 120,
     [switch]$SimulateCrash,
+    [switch]$SimulateAuthFail,
+    [int]$StopAfterStreak = 2,
     [switch]$NoRelaunch,
     [switch]$KeepProcesses,
     [switch]$NoNotice,
@@ -118,6 +120,8 @@ if ($WaitSeconds -lt 0) {
 }
 if ([string]::IsNullOrWhiteSpace($LogDir))       { $LogDir = Join-Path $ScriptDir 'logs' }
 if ([string]::IsNullOrWhiteSpace($ExePath))      { $ExePath = Find-DshExe }
+# 「同一个崩溃指纹连续失败」的计数文件：健康启动会删掉它
+$StateFile = Join-Path $SnapshotRoot 'fail-streak.json'
 if ([string]::IsNullOrWhiteSpace($ExePath))      { $ExePath = '' }
 
 $logFile = $null
@@ -226,6 +230,35 @@ try {
         Write-Log ('SimulateCrash: wrote ' + $fake)
     }
 
+    # 复刻真实认证失败日志的形状：20 行、Error 在第 12 行（守护旧版只看前 6 行，正好看不见）
+    if ($SimulateAuthFail) {
+        if (-not (Test-Path $CrashLogDir)) { New-Item -ItemType Directory -Force -Path $CrashLogDir | Out-Null }
+        $fake2 = Join-Path $CrashLogDir ('crash-' + (Get-Date -Format 'yyyy-MM-ddTHH-mm-ss-fffZ') + '-host.log')
+        $fakeBody = @(
+            'app          : @deepseek-ai/dsh-desktop 0.2.1-rc.3',
+            'electron     : 44.7.0',
+            'node         : 24.21.0',
+            'platform     : win32 x64',
+            'locale       : zh-CN',
+            'profile      : desktop',
+            'profileDir   : C:\Users\WYingJie\.dsh\profiles\desktop',
+            'webServer    : 127.0.0.1 (ephemeral)',
+            'boot         : 1 entry pending',
+            '',
+            'stack:',
+            'Error: desktop welcome: Web authentication failed',
+            '    at welcome (app/main.js:3312:19)',
+            '    at process.processTicksAndRejections (node:internal/process/task_queues:95:5)',
+            '    at async App.whenReady (app/main.js:2077:5)',
+            '',
+            'web boot: 1 entry did not activate',
+            'diagnostics: see logs above',
+            'exit code: 1'
+        )
+        Set-Content -LiteralPath $fake2 -Value $fakeBody -Encoding UTF8
+        Write-Log ('SimulateAuthFail: wrote ' + $fake2)
+    }
+
     # ---- 4. 判定 ----
     $newLogs = @()
     if (Test-Path $CrashLogDir) {
@@ -268,17 +301,77 @@ try {
             Write-Log 'startup: n/a (no fresh instance from this launch)'
         }
 
+        # 跑起来了 = 上一轮的「连续失败」计数作废
+        if (Test-Path -LiteralPath $StateFile) {
+            Remove-Item -LiteralPath $StateFile -Force -ErrorAction SilentlyContinue
+            Write-Log 'reset: fail-streak cleared'
+        }
+
         # 不管这次健康与否都修剪，否则连续失败会让 pre-boot 无限堆积
         Prune-OldSnapshots
         Write-Log '=== watchdog end (healthy) ==='
         exit 0
     }
 
-    # ---- 5. 失败：回滚 ----
+    # ---- 5. 失败：先读全文判断病因，再决定要不要回滚 ----
     Write-Log ('FAIL: ' + (($newLogs | ForEach-Object { $_.Name }) -join ', '))
+    $authFail = $false
+    $fingerprint = ''
     foreach ($l in $newLogs) {
-        $head = Get-Content -LiteralPath $l.FullName -TotalCount 6 -ErrorAction SilentlyContinue
-        Write-Log ('  ' + $l.Name + ' :: ' + (($head -join ' | ') -replace '\s+', ' '))
+        $body = @(Get-Content -LiteralPath $l.FullName -TotalCount 60 -ErrorAction SilentlyContinue)
+        $errLine = @($body | Where-Object { $_ -match '^\s*(Error|TypeError|RangeError|ReferenceError|SyntaxError):' }) | Select-Object -First 1
+        if (-not $errLine) {
+            $errLine = @($body | Where-Object { $_ -match 'Error|failed|FAILED' }) | Select-Object -First 1
+        }
+if (-not $errLine) {
+                $errLine = @($body | Where-Object { $_ -match 'SIMULATED|web boot:' }) | Select-Object -First 1
+            }
+            if (-not $errLine) {
+                $errLine = @($body | Where-Object { $_.Trim() -ne '' }) | Select-Object -First 1
+            }
+        if ($errLine -and ($errLine -match 'Web authentication failed')) { $authFail = $true }
+        if ((-not $fingerprint) -and $errLine) { $fingerprint = ($errLine.Trim() -replace '\s+', ' ') }
+        Write-Log ('  ' + $l.Name + ' -> ' + ((($body | Select-Object -First 14) -join ' | ') -replace '\s+', ' '))
+    }
+    if (-not $fingerprint) { $fingerprint = 'unknown failure (' + $newLogs.Count + ' log(s), no Error line)' }
+    Write-Log ('fingerprint: ' + $fingerprint)
+
+    # 同一指纹连续第几次？（健康启动会把计数清掉）
+    $streak = 0
+    if (Test-Path -LiteralPath $StateFile) {
+        try {
+            $st = Get-Content -LiteralPath $StateFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+            if ($st -and ($st.fingerprint -eq $fingerprint)) { $streak = [int]$st.count }
+        } catch {}
+    }
+    $streak++
+    try {
+        $json = @{ fingerprint = $fingerprint; count = $streak; at = (Get-Date).ToString('o') } | ConvertTo-Json -Compress
+        [System.IO.File]::WriteAllText($StateFile, $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {}
+    Write-Log ('streak: ' + $streak + '  (stop at ' + $StopAfterStreak + ')')
+
+    # 认证失败不是配置问题：回滚只会把好配置换掉，重启也只会再失败一次
+    if ($authFail) {
+        $cookieDir = Join-Path $env:APPDATA '@deepseek-ai\dsh-desktop\Network'
+        Write-Log 'AUTH-FAIL: "Web authentication failed" -> cookie store, not config. Nothing rolled back.'
+        if (-not $NoNotice) {
+            Show-Notice ("DSH 启动失败：认证失败（Web authentication failed）。`r`n`r`n这不是配置问题，所以没有回滚、也没有重启。`r`n`r`n处理办法：`r`n1. 先完全退出 DSH`r`n2. 删除这个目录里的 Cookies 文件`r`n   " + $cookieDir + "`r`n   （只删 Cookies 这一个，重启会自动重建）`r`n3. 再从桌面图标启动`r`n`r`n日志: " + $logFile) 48
+        }
+        Prune-OldSnapshots
+        Write-Log '=== watchdog end (auth-fail, nothing rolled back) ==='
+        exit 2
+    }
+
+    # 同一个指纹已经回滚过一次还这样：再来一轮也救不回来，停下来把原因交给人
+    if ($streak -ge $StopAfterStreak) {
+        Write-Log ('STOP: same failure ' + $streak + ' times in a row - another rollback would not help')
+        if (-not $NoNotice) {
+            Show-Notice ("DSH 连续 " + $streak + " 次以同样的方式启动失败：`r`n" + $fingerprint + "`r`n`r`n上次已经回滚过配置，仍然如此，所以这次不再回滚、也不再重启。`r`n`r`n看门狗日志: " + $logFile + "`r`n崩溃日志: " + $newLogs[0].Name) 48
+        }
+        Prune-OldSnapshots
+        Write-Log '=== watchdog end (stopped after repeated failure) ==='
+        exit 3
     }
 
     $goodDir = Join-Path $SnapshotRoot 'last-good'
@@ -289,6 +382,15 @@ try {
         $restoreFrom = $preDir
         Write-Log "WARN: no last-good, falling back to this run's pre-boot snapshot"
     }
+
+    # 回滚前先把「现在这份坏掉的」另存一份：万一 last-good 才是过时的，还有东西可查
+    $preRollback = Join-Path $SnapshotRoot ('pre-rollback-' + $started.ToString('yyyyMMdd-HHmmss'))
+    $prCount = 0
+    try {
+        Copy-ConfigSnapshot -src $ProfileDir -dst $preRollback
+        $prCount = @(Get-ChildItem -LiteralPath $preRollback -File -ErrorAction SilentlyContinue).Count
+    } catch {}
+    Write-Log ('backup of current profile -> ' + $preRollback + ' (' + $prCount + ' files)')
 
     if (-not $KeepProcesses) {
         $procs = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
@@ -303,16 +405,22 @@ try {
     Write-Log ('restored ' + $n + ' config file(s) from ' + $restoreFrom)
 
     if (-not $NoRelaunch) {
-        if ($ExePath -and (Test-Path $ExePath)) {
+        # 必须走 start-dsh.vbs 重启，否则新实例没有看门狗（断链）；第 3 条会拦住无休止的重启
+        $vbs = Join-Path $ScriptDir 'start-dsh.vbs'
+        if (Test-Path -LiteralPath $vbs) {
+            $wscript = Join-Path $env:WINDIR 'System32\wscript.exe'
+            Start-Process -FilePath $wscript -ArgumentList ('"' + $vbs + '"') | Out-Null
+            Write-Log ('relaunched via ' + $vbs)
+        } elseif ($ExePath -and (Test-Path $ExePath)) {
             Start-Process -FilePath $ExePath | Out-Null
-            Write-Log 'relaunched'
+            Write-Log 'relaunched (direct exe: start-dsh.vbs not found)'
         } else {
             Write-Log ('ERROR: exe not found: ' + $ExePath)
         }
     }
 
     if (-not $NoNotice) {
-        Show-Notice ("DSH failed to start. Config rolled back and relaunched.`n`nCrash log: " + ($newLogs[0].Name) + "`nRestored from: " + $restoreFrom + "`n`nDetails: " + $logFile) 48
+        Show-Notice ("DSH failed to start. Config rolled back and relaunched.`n`nCrash log: " + ($newLogs[0].Name) + "`nRestored from: " + $restoreFrom + "`nCurrent profile saved to: " + $preRollback + "`n`nDetails: " + $logFile) 48
     }
     Prune-OldSnapshots
     Write-Log '=== watchdog end (rolled back) ==='

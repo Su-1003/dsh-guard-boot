@@ -103,8 +103,9 @@ WaitSeconds=20
 | 文件 | 作用 |
 |---|---|
 | `install.ps1` | 一次性安装：找路径、写配置、预置 last-good、建快捷方式 |
-| `start-dsh.vbs` | 双击入口。先起 exe，再隐藏起看门狗 |
+| `start-dsh.vbs` | 双击入口。先跑 cookie 体检，再起 exe，最后隐藏起看门狗 |
 | `watchdog.ps1` | 快照、判定、回滚 |
+| `preflight.ps1` | 启动前的 cookie 体检（只在 exe 起来之前读得到那个库） |
 | `config.ini` | 由 install.ps1 生成，可手改 |
 | `assets/logo.ico` | 快捷方式图标（install.ps1 优先用它） |
 | `assets/logo.png` | 仓库头像 / 文档用图（`assets/make-logo.py` 用 Pillow 生成） |
@@ -130,13 +131,37 @@ startup: 12 s (window visible)
 | `startup: n/a (no fresh instance from this launch)` | 这次没有新进程（重复双击、实例已在跑），没东西可量 |
 | `startup: not observed within 120 s (process alive, no window)` | 进程活着但窗口一直没出来 —— 卡在启动里了，值得看一眼 |
 
+### 认得出哪些失败
+
+不是所有失败都该回滚配置。看门狗读崩溃日志的**全文**（最多 60 行），先判断病因：
+
+| 崩溃日志里看到 | 它做什么 | 退出码 |
+|---|---|---|
+| `Web authentication failed` | **不回滚、也不重启**，只弹窗给清 cookie 的步骤 —— 坏的是登录状态，回滚只会把好配置换掉 | 2 |
+| 其它错误（或读不出错误文本） | 备份当前 profile → 回滚 `last-good` → 经 `start-dsh.vbs` 重启，新实例同样带守护 | 1 |
+| 同一个错误连续第 2 次 | **停手**：已经回滚过一次还这样，再来一次也不会好，把原因交给人 | 3 |
+
+「同一个错误」用崩溃日志里第一行 Error 文本做指纹（记在 `fail-streak.json`），健康启动一次就清零。
+回滚之前，当前那份配置会先另存为 `pre-rollback-<时间戳>\` —— 万一 `last-good` 才是过时的，还有东西可查。
+
+### 启动前的 cookie 体检
+
+`preflight.ps1` 由 `start-dsh.vbs` 在**起 exe 之前**同步调用 —— 那一瞬间 cookie 库还没被 Chromium 锁住，读得到；DSH 一跑起来就连 `FileShare.ReadWrite` 也打不开。
+
+- 数的是 `dsh-auth-*` 的条数（优先用 node 读 sqlite；没有 node 就退回字节扫描，只判量级）
+- 超过 `-WarnCount`（默认 15）→ 提示一次，不动手
+- 超过 `-CleanCount`（默认 30）→ 弹确认框，点「是」才先备份 `Cookies.bak-<时间戳>` 再清理
+
+它**从不自动清**（那会把人踢下线），也不会阻塞启动：任何异常都只是写一行日志。
+
 ## 边界（老实说）
 
 - **只救配置层**：插件/配置把启动弄坏这一类。exe 损坏、asar 被覆盖、磁盘满、端口被占 —— 回滚配置没用，但它会在日志里写清楚。
 - **只在那 20 秒窗口里看一次**：运行中闪退、用一半 OOM 崩溃，它不知道。
-- **只认崩溃日志**：如果某种失败模式不写 `crash-*.log`，它会误判为健康。
+- **只认崩溃日志**：如果某种失败模式不写 `crash-*.log`，它会误判为健康。日志写了、但里面没有可识别的错误文本时，指纹记成 `unknown failure`，仍然走回滚。
 - **只在从该快捷方式启动时生效**：从开始菜单或命令行启动 DSH 不会有保护。
 - **重复双击不会污染 last-good**：判定只认「启动后 15 秒内新出现的进程」，已经在跑的旧实例不算数，所以"其实没启动成功"的那次不会把配置认证成 good。
+- **认得出「认证失败」这种配置救不了的病**，见下一节 —— 它不会在同一个坑里无限回滚。
 
 ## 演练
 
