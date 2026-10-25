@@ -16,6 +16,7 @@ param(
     [string]$SnapshotRoot = '',
     [string]$CrashLogDir  = '',
     [int]$WaitSeconds     = -1,
+    [int]$StartupWatchSeconds = 120,
     [switch]$SimulateCrash,
     [switch]$NoRelaunch,
     [switch]$KeepProcesses,
@@ -158,6 +159,27 @@ function Prune-OldSnapshots {
     }
 }
 
+function Get-StartupSeconds {
+    # 从「启动时刻」到「窗口真正出现」的秒数。
+    # 只认本次启动的新实例：旧实例的窗口一直开着，拿它计时会得到 0 秒的假数据。
+    param([datetime]$LaunchAt, [datetime]$FreshAt, [int]$MaxSeconds = 120)
+    $deadline = (Get-Date).AddSeconds($MaxSeconds)
+    while ((Get-Date) -lt $deadline) {
+        foreach ($p in @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {
+            $fresh = $true
+            try { $fresh = ($p.StartTime -ge $FreshAt) } catch { $fresh = $true }
+            if (-not $fresh) { continue }
+            try {
+                if ($p.MainWindowHandle -ne 0) {
+                    return [int]([math]::Round(((Get-Date) - $LaunchAt).TotalSeconds))
+                }
+            } catch { }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    return -1
+}
+
 function Show-Notice {
     param([string]$text, [int]$icon)
     try {
@@ -233,6 +255,19 @@ try {
         } else {
             Write-Log ('SKIP: no fresh process named "' + $ProcessName + '" - not certifying this config as last-good')
         }
+
+        # ---- 启动耗时记账：等窗口真的出现（旧实例不算，见 Get-StartupSeconds）----
+        if ($procAlive -gt 0) {
+            $startupSec = Get-StartupSeconds -LaunchAt $started -FreshAt $freshAt -MaxSeconds $StartupWatchSeconds
+            if ($startupSec -ge 0) {
+                Write-Log ('startup: ' + $startupSec + ' s (window visible)')
+            } else {
+                Write-Log ('startup: not observed within ' + $StartupWatchSeconds + ' s (process alive, no window)')
+            }
+        } else {
+            Write-Log 'startup: n/a (no fresh instance from this launch)'
+        }
+
         # 不管这次健康与否都修剪，否则连续失败会让 pre-boot 无限堆积
         Prune-OldSnapshots
         Write-Log '=== watchdog end (healthy) ==='

@@ -112,6 +112,24 @@ WaitSeconds=20
 快照目录：`%USERPROFILE%\.dsh\boot-snapshots\`（`last-good\` 一份 + 最多 5 份 `pre-boot-*\`，合计约 1 MB）
 日志目录：`logs\`（每次启动一份 `watchdog-<时间戳>.log`）
 
+### 启动耗时
+
+健康启动的日志里会多一行：
+
+```
+startup: 12 s (window visible)
+```
+
+它量的是 **exe 起到窗口真正出现**（`MainWindowHandle` 非 0）的秒数，最多等 `-StartupWatchSeconds`（默认 120 秒）。
+只认「本次启动」的新实例——旧实例的窗口一直开着，不筛的话每个数字都会是 0。
+
+另外两种取值也是信息：
+
+| 日志 | 含义 |
+|---|---|
+| `startup: n/a (no fresh instance from this launch)` | 这次没有新进程（重复双击、实例已在跑），没东西可量 |
+| `startup: not observed within 120 s (process alive, no window)` | 进程活着但窗口一直没出来 —— 卡在启动里了，值得看一眼 |
+
 ## 边界（老实说）
 
 - **只救配置层**：插件/配置把启动弄坏这一类。exe 损坏、asar 被覆盖、磁盘满、端口被占 —— 回滚配置没用，但它会在日志里写清楚。
