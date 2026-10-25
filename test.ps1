@@ -309,6 +309,13 @@ $cases = [ordered]@{
         Assert 'p5 db kept'          (Test-Path -LiteralPath $r.db) $r.db
         Assert 'p5 nothing deleted'  ($r.log -notmatch 'deleted whole cookie db') $r.log
     }
+    'p6-preflight-clean-throttled' = {
+        $d = New-Case 'p6-preflight-clean-throttled'
+        $null = Invoke-Preflight -Dir $d -Cookies 40 -Extra @{ CleanCount = 30 }
+        $r = Invoke-Preflight -Dir $d -Cookies 40 -Extra @{ CleanCount = 30 }
+        Assert 'p6 throttled'        ($r.log -match 'clean prompt throttled') $r.log
+        Assert 'p6 db kept'          (Test-Path -LiteralPath $r.db) $r.db
+    }
     'g-old-logs-healthy' = {
         $d = New-Case 'g-old-logs-healthy'
         for ($i = 1; $i -le 3; $i++) {

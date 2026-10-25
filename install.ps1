@@ -101,16 +101,28 @@ $snapRoot   = Join-Path $env:USERPROFILE '.dsh\boot-snapshots'
 $goodDir    = Join-Path $snapRoot 'last-good'
 $files = @('package.json','pnpm-lock.yaml','pnpm-workspace.yaml','cordis.yml','cordis.patch.yml','compatibility.json')
 
-$copied = 0
+# 只有凑齐 6 个文件才把它当基线：半份快照一旦被当成 last-good，
+# 之后每次启动都会回滚到一份可能根本起不来的配置（见 README「限制」一节）。
+$total = $files.Count
+$available = 0
 if (Test-Path $profileDir) {
+    foreach ($f in $files) { if (Test-Path (Join-Path $profileDir $f)) { $available++ } }
+}
+if ($available -eq $total) {
     if (-not (Test-Path $goodDir)) { New-Item -ItemType Directory -Force -Path $goodDir | Out-Null }
     foreach ($f in $files) {
-        $s = Join-Path $profileDir $f
-        if (Test-Path $s) { Copy-Item -LiteralPath $s -Destination (Join-Path $goodDir $f) -Force; $copied++ }
+        Copy-Item -LiteralPath (Join-Path $profileDir $f) -Destination (Join-Path $goodDir $f) -Force
     }
+    Write-Step ('last-good seeded: ' + $goodDir + ' (' + $total + ' of ' + $total + ' files)')
 }
-if ($copied -ge 3) { Write-Step ('last-good seeded: ' + $goodDir + ' (' + $copied + ' files)') }
-else { Write-Step ('WARN: profile not found or incomplete (' + $copied + ' files) - last-good NOT seeded: ' + $profileDir) }
+elseif ($available -eq 0) {
+    Write-Step ('WARN: profile not found or empty - last-good NOT seeded: ' + $profileDir)
+}
+else {
+    Write-Step ('WARN: profile is incomplete (' + $available + ' of ' + $total + ' files) - last-good NOT seeded.')
+    Write-Step '      seeding a partial snapshot could roll DSH back to a config that cannot boot.'
+    Write-Step '      launch DSH once normally instead: the guard certifies a real good snapshot by itself.'
+}
 
 # ---- 4. desktop shortcut ----
 $vbs = Join-Path $ScriptDir 'start-dsh.vbs'

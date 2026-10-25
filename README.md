@@ -78,7 +78,7 @@ cd dsh-guard-boot
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-`install.ps1` 会：找 exe（卸载表 → 已有快捷方式 → 常见路径）→ 写 `config.ini` → 用当前配置预置一份 `last-good` → 在桌面建快捷方式。
+`install.ps1` 会：找 exe（卸载表 → 已有快捷方式 → 常见路径）→ 写 `config.ini` → 用当前配置预置一份 `last-good` → 在桌面建快捷方式。预置要求 6 个受管文件**凑齐**；缺文件的 profile 不会播种（半份快照可能把你回滚到起不来的配置），这时正常启动一次、让看门狗自己认证即可。
 
 找不到 exe 时显式指定：
 
@@ -104,11 +104,11 @@ WaitSeconds=20
 
 | 文件 | 作用 |
 |---|---|
-| `install.ps1` | 一次性安装：找路径、写配置、预置 last-good、建快捷方式 |
+| `install.ps1` | 一次性安装：找路径、写配置、预置 last-good（需 6 文件齐全）、建快捷方式 |
 | `start-dsh.vbs` | 双击入口。先跑 cookie 体检，再起 exe，最后隐藏起看门狗 |
 | `watchdog.ps1` | 快照、判定、回滚 |
 | `preflight.ps1` | 启动前的 cookie 体检（只在 exe 起来之前读得到那个库） |
-| `test.ps1` | 回归测试：23 组用例、81 条断言，改完跑一遍 |
+| `test.ps1` | 回归测试：24 组用例、83 条断言，改完跑一遍 |
 | `restore.ps1` | 手动把某一份快照恢复到 profile（`last-good` / 任意 `pre-boot-*` / 绝对路径） |
 | `config.ini` | 由 install.ps1 生成，可手改 |
 | `assets/logo.ico` | 快捷方式图标（install.ps1 优先用它） |
@@ -212,14 +212,25 @@ $ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 & $ps5 -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 ```
 
-- 23 组用例、81 条断言，全过退出码 `0`，有一条红就 `1`
+- 24 组用例、83 条断言，全过退出码 `0`，有一条红就 `1`
 - 每组都在 `%TEMP%\dsh-guard-test-<时间戳>\` 下造独立沙箱（自带一份 profile 副本），**不碰 `~\.dsh`、不碰真实 `last-good`**，全程 `-NoNotice` 不弹框
-- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 抢锁是原子的（`CreateNew`）/ 卡死计数不被健康路径误清 / **回滚前先释放锁**（含日志顺序断言）/ `restore.ps1` 的恢复、拒绝、找不到、列表、`-Prune` / `preflight.ps1` 的计数、告警节流、涨到阈值再提醒、超线后拒绝清理（`-NoPopup` 下不删任何文件）
+- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 抢锁是原子的（`CreateNew`）/ 卡死计数不被健康路径误清 / **回滚前先释放锁**（含日志顺序断言）/ `restore.ps1` 的恢复、拒绝、找不到、列表、`-Prune` / `preflight.ps1` 的计数、告警节流、涨到阈值再提醒、清理询问同样每日节流、超线后拒绝清理（`-NoPopup` 下不删任何文件）
 - 可选参数：`-Filter g` 只跑名字含 g 的用例，`-Keep` 保留沙箱供排查
 
 ## 卸载
 
-删掉快捷方式即可；本目录与 `%USERPROFILE%\.dsh\boot-snapshots\` 都是纯文件，随时可删，DSH 本身不受影响。
+三样东西，删不删都不影响 DSH 能不能启动——它只是个外挂启动器：
+
+| 删什么 | 位置 | 删掉会失去什么 |
+| --- | --- | --- |
+| 桌面快捷方式 | `DSH.lnk` | 少一个入口；原版 `DeepSeek Harness` 图标照常可用 |
+| 本目录 | 你 clone 下来的 `dsh-guard-boot\` | 守护本身、脚本、`config.ini`、`logs\` |
+| 快照目录 | `%USERPROFILE%\.dsh\boot-snapshots\` | `last-good\`、`pre-boot-*\`、`pre-rollback-*\`、`pre-restore-*\`、`fail-streak.json`、`hang-streak.json`、`watchdog.lock` |
+
+- 快照目录留着没坏处：满打满算约 1 MB（`last-good` 1 份 + `pre-boot` 5 份 + `pre-rollback` 10 份 + `pre-restore` 10 份，修剪逻辑见上文）。
+- 删掉它也不会让 DSH 出问题，只是以后想「回到某份能启动的配置」就没有料了。
+- 删除顺序建议：先删快捷方式（免得以后又双击），再删本目录，快照目录随你。
+- 卸载前若 DSH 正在跑，先退出——`watchdog.lock` 与正在写的日志会拦住删除。
 
 ## English
 

@@ -112,6 +112,38 @@ db.close();
     return -1
 }
 
+# 弹窗节流的小工具：同一个 state 文件同时服务「告警」与「清理询问」两条分支
+function Get-PromptState {
+    param([string]$path)
+
+    $o = [pscustomobject]@{ date = ''; count = -1 }
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $st = Get-Content -LiteralPath $path -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+            if ($st) { $o.date = [string]$st.date; $o.count = [int]$st.count }
+        } catch {}
+    }
+    return $o
+}
+
+function Test-ShouldPrompt {
+    param($State, [int]$Count, [int]$Gap, [string]$Today)
+
+    if ($State.date -ne $Today) { return $true }
+    if ($State.count -lt 0) { return $true }
+    if ($Count -ge ($State.count + $Gap)) { return $true }
+    return $false
+}
+
+function Save-PromptState {
+    param([string]$path, [int]$Count)
+
+    try {
+        $json = '{"date":"' + (Get-Date).ToString('yyyy-MM-dd') + '","count":' + $Count + '}'
+        [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    } catch {}
+}
+
 try {
     $cookies = Join-Path $CookieDir 'Cookies'
     if (-not (Test-Path -LiteralPath $cookies)) {
@@ -134,9 +166,16 @@ try {
     if ($count -le $WarnCount) { exit 0 }
 
     if ($count -gt $CleanCount -and -not $Quiet) {
+        # 清理询问也要节流：否则每天每次启动都弹一个要你点「是」的框
+        $promptState = Get-PromptState $StateFile
+        if (-not (Test-ShouldPrompt -State $promptState -Count $count -Gap $RemindGap -Today ((Get-Date).ToString('yyyy-MM-dd')))) {
+            Write-PLog ('clean prompt throttled (asked today at ' + $promptState.count + ', now ' + $count + ')')
+            exit 0
+        }
         $answer = Show-Popup ("DSH 的认证 cookie 有 " + $count + " 条，超过清理线 " + $CleanCount + "。`r`n`r`n" +
                               "它们越积越多时，DSH 启动会报 `"Web authentication failed`"。`r`n`r`n" +
                               "现在备份并清理到只剩登录凭证吗？`r`n（会先复制一份 Cookies.bak-时间戳，失败可还原）") 52 60
+        Save-PromptState $StateFile $count
         if ($answer -eq 6) {
             $stamp  = Get-Date -Format 'yyyyMMdd-HHmmss'
             $backup = Join-Path $CookieDir ('Cookies.bak-' + $stamp)
