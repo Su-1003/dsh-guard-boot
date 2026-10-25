@@ -284,6 +284,11 @@ try {
     }
 
     # ---- 4. 判定 ----
+    # 崩溃日志的容差必须在下面的过滤里就用上：exe 比看门狗先起几百毫秒，
+    # 日志时间戳可能早于 $started，只比 $started 会把「刚起就崩」的那一份漏掉。
+    # 这个赋值原先写在过滤之后，$crashSince 在过滤时还是 $null；
+    # 而 [datetime] -gt $null 恒为 True，会让每一份历史崩溃日志都算「新的」。
+    $crashSince = $started.AddSeconds(-$GraceSeconds)
     $newLogs = @()
     if (Test-Path $CrashLogDir) {
         $newLogs = @(Get-ChildItem -LiteralPath $CrashLogDir -Filter 'crash-*.log' -File -ErrorAction SilentlyContinue |
@@ -293,9 +298,6 @@ try {
     # 否则一份根本没启动过的配置会被认证成 last-good。按开始时间判定，
     # 避开 start-dsh.vbs「先起 exe、再起看门狗」的先后抢跑。
     $freshAt = $started.AddSeconds(-$GraceSeconds)
-    # 崩溃日志也用同一个容差：exe 比看门狗先起几百毫秒，日志时间戳可能早于 $started，
-    # 只比 $started 会把「刚起就崩」的那一份漏掉。
-    $crashSince = $started.AddSeconds(-$GraceSeconds)
     $procAlive = 0
     foreach ($p in @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)) {
         try { if ($p.StartTime -ge $freshAt) { $procAlive++ } } catch { $procAlive++ }
@@ -362,11 +364,11 @@ try {
             $errLine = @($body | Where-Object { $_ -match 'Error|failed|FAILED' }) | Select-Object -First 1
         }
         if (-not $errLine) {
-                $errLine = @($body | Where-Object { $_ -match 'SIMULATED|web boot:' }) | Select-Object -First 1
-            }
-            if (-not $errLine) {
-                $errLine = @($body | Where-Object { $_.Trim() -ne '' }) | Select-Object -First 1
-            }
+            $errLine = @($body | Where-Object { $_ -match 'SIMULATED|web boot:' }) | Select-Object -First 1
+        }
+        if (-not $errLine) {
+            $errLine = @($body | Where-Object { $_.Trim() -ne '' }) | Select-Object -First 1
+        }
         if ($errLine -and ($errLine -match 'Web authentication failed')) { $authFail = $true }
         if ((-not $fingerprint) -and $errLine) { $fingerprint = ($errLine.Trim() -replace '\s+', ' ') }
         Write-Log ('  ' + $l.Name + ' -> ' + ((($body | Select-Object -First 14) -join ' | ') -replace '\s+', ' '))
