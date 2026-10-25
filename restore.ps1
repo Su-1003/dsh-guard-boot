@@ -122,6 +122,28 @@ try {
         exit 1
     }
 
+    # 0) 看门狗正在回滚时也不要写：它第一时间就把 DSH 杀掉了，所以下面那条
+    #    「DSH 在跑就拒绝」拦不住它，只有锁文件能说明「有别的进程正在动 profile」。
+    $lockFile = Join-Path $SnapshotRoot 'watchdog.lock'
+    if (Test-Path -LiteralPath $lockFile) {
+        $lockRaw = ''
+        try { $lockRaw = [string](Get-Content -LiteralPath $lockFile -Raw -ErrorAction SilentlyContinue) } catch {}
+        $lm = [regex]::Match($lockRaw, 'pid=(\d+)')
+        if ($lm.Success) {
+            $lockPid = [int]$lm.Groups[1].Value
+            $lockProc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+            if ($lockProc -and $lockProc.ProcessName -match '^(powershell|pwsh)$') {
+                if (-not $Force) {
+                    Write-R ('REFUSED: a watchdog is running (pid ' + $lockPid + ') and may be rewriting the profile right now.')
+                    Write-R 'It kills DSH before restoring, so the "DSH is running" check below cannot catch it.'
+                    Write-R 'Wait a few seconds for it to finish, then run this again. (-Force to override anyway.)'
+                    exit 2
+                }
+                Write-R ('WARN: forcing while a watchdog (pid ' + $lockPid + ') holds the lock')
+            }
+        }
+    }
+
     # 1) 正在运行就拒绝：退出时 DSH 会重写 cordis.yml / package.json
     $running = @(Get-Process -Name $ProcessName -ErrorAction SilentlyContinue)
     if ($running.Count -gt 0 -and -not $Force) {

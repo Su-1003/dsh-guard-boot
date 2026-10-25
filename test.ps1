@@ -504,6 +504,22 @@ $cases = [ordered]@{
         $null = Invoke-Restore -Dir $d -Extra @{ From = 'last-good'; Prune = $true }
         Assert 'r5 kept unmanaged file' (Test-Path -LiteralPath (Join-Path $d 'profile\keep-me.txt')) ''
     }
+
+    'r6-refuse-watchdog-lock' = {
+        $d = New-Case 'r6-refuse-watchdog-lock'
+        $good = Join-Path $d 'snap\last-good'
+        New-Item -ItemType Directory -Path $good -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $good 'package.json') -Value 'GOOD:locked' -Encoding UTF8
+        # 拿测试进程自己的 pid 造一把「活锁」——它确实是活着的 powershell
+        Set-Content -LiteralPath (Join-Path $d 'snap\watchdog.lock') -Value ('pid=' + $PID) -Encoding Ascii
+        $r = Invoke-Restore -Dir $d -Extra @{ From = 'last-good' }
+        Assert 'r6 exit 2'          ($r.code -eq 2) ('exit=' + $r.code + ' out=' + $r.out)
+        Assert 'r6 names the lock'  ($r.out -match 'a watchdog is running') $r.out
+        Assert 'r6 nothing changed' ((Get-Content -LiteralPath (Join-Path $d 'profile\package.json') -Raw) -notmatch 'GOOD:locked') ''
+        $f = Invoke-Restore -Dir $d -Extra @{ From = 'last-good'; Force = $true }
+        Assert 'r6 force overrides' ($f.code -eq 0) ('exit=' + $f.code + ' out=' + $f.out)
+        Assert 'r6 force copied'    ((Get-Content -LiteralPath (Join-Path $d 'profile\package.json') -Raw) -match 'GOOD:locked') ''
+    }
 }
 
 Write-Host ''

@@ -108,7 +108,7 @@ WaitSeconds=20
 | `start-dsh.vbs` | 双击入口。先跑 cookie 体检，再起 exe，最后隐藏起看门狗 |
 | `watchdog.ps1` | 快照、判定、回滚 |
 | `preflight.ps1` | 启动前的 cookie 体检（只在 exe 起来之前读得到那个库） |
-| `test.ps1` | 回归测试：24 组用例、83 条断言，改完跑一遍 |
+| `test.ps1` | 回归测试：25 组用例、88 条断言，跑一遍约 1 分钟 |
 | `restore.ps1` | 手动把某一份快照恢复到 profile（`last-good` / 任意 `pre-boot-*` / 绝对路径） |
 | `config.ini` | 由 install.ps1 生成，可手改 |
 | `assets/logo.ico` | 快捷方式图标（install.ps1 优先用它） |
@@ -212,9 +212,9 @@ $ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 & $ps5 -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 ```
 
-- 24 组用例、83 条断言，全过退出码 `0`，有一条红就 `1`
-- 每组都在 `%TEMP%\dsh-guard-test-<时间戳>\` 下造独立沙箱（自带一份 profile 副本），**不碰 `~\.dsh`、不碰真实 `last-good`**，全程 `-NoNotice` 不弹框
-- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 抢锁是原子的（`CreateNew`）/ 卡死计数不被健康路径误清 / **回滚前先释放锁**（含日志顺序断言）/ `restore.ps1` 的恢复、拒绝、找不到、列表、`-Prune` / `preflight.ps1` 的计数、告警节流、涨到阈值再提醒、清理询问同样每日节流、超线后拒绝清理（`-NoPopup` 下不删任何文件）
+- 25 组用例、88 条断言，全过退出码 `0`，有一条红就 `1`
+- **跑多久：约 1 分钟**（实测 57.7 秒）。原因不是代码慢，而是它要起真实进程、每个用例都要等窗口出现或等超时，跟单元测试不是一个量级 —— 所以别放在「随手跑一下」的循环里，改完 `watchdog.ps1` / `preflight.ps1` / `restore.ps1` 再跑
+- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 抢锁是原子的（`CreateNew`）/ 卡死计数不被健康路径误清 / **回滚前先释放锁**（含日志顺序断言）/ `restore.ps1` 的恢复、拒绝（DSH 在跑 / 看门狗持锁）、找不到、列表、`-Prune` / `preflight.ps1` 的计数、告警节流、涨到阈值再提醒、清理询问同样每日节流、超线后拒绝清理（`-NoPopup` 下不删任何文件）
 - 可选参数：`-Filter g` 只跑名字含 g 的用例，`-Keep` 保留沙箱供排查
 
 ## 卸载
