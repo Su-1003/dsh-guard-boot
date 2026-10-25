@@ -16,7 +16,10 @@
 param(
     [string]$WorkRoot = '',
     [string]$Filter   = '',
-    [switch]$Keep
+    [switch]$Keep,
+    # 受限环境（无桌面/会话隐藏启动）里假进程拿不到窗口句柄，
+    # 依赖真窗口的断言会被标成 SKIP 而不是 FAIL。
+    [switch]$AssumeNoWindow
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,6 +85,39 @@ function New-FreshProcess([string]$title) {
 
 function Stop-FreshProcess($proc) {
     if ($proc -and -not $proc.HasExited) { try { $proc.Kill() } catch {} }
+}
+
+# 这台机器/shell 能不能给假进程一个真窗口。拿不到时，所有「必须等到窗口
+# 才认证 last-good」的断言都无法验证（不是脚本坏了），标 SKIP。
+function Test-WindowCapability {
+    $p = $null
+    try {
+        $p = New-FreshProcess 'win-probe'
+        for ($i = 0; $i -lt 20; $i++) {
+            Start-Sleep -Milliseconds 250
+            $q = Get-Process -Id $p.Id -ErrorAction SilentlyContinue
+            if (-not $q) { break }
+            if ($q.MainWindowHandle -ne 0) { return $true }
+        }
+        return $false
+    } catch {
+        return $false
+    } finally {
+        Stop-FreshProcess $p
+    }
+}
+
+$script:Skipped = 0
+$script:WindowCapable = $false
+if (-not $AssumeNoWindow) { $script:WindowCapable = Test-WindowCapability }
+
+function AssertW([string]$name, [bool]$ok, [string]$detail) {
+    if (-not $script:WindowCapable) {
+        $script:Skipped++
+        Write-Host ('  SKIP  ' + $name + '   no window in this environment') -ForegroundColor Yellow
+        return
+    }
+    Assert $name $ok $detail
 }
 
 function Invoke-Watchdog {
@@ -183,8 +219,8 @@ $cases = [ordered]@{
         $code = Invoke-Watchdog -Dir $d
         $log = Get-WatchdogLog $d
         Assert 'a exit 0' ($code -eq 0) ('exit=' + $code)
-        Assert 'a certified last-good' ($log -match 'OK: refreshed last-good') ''
-        Assert 'a last-good exists' (Test-Path -LiteralPath (Join-Path $d 'snap\last-good')) ''
+        AssertW 'a certified last-good' ($log -match 'OK: refreshed last-good') ''
+        AssertW 'a last-good exists' (Test-Path -LiteralPath (Join-Path $d 'snap\last-good')) ''
         Stop-FreshProcess $proc
     }
 
@@ -327,7 +363,7 @@ $cases = [ordered]@{
         $log = Get-WatchdogLog $d
         Assert 'g exit 0' ($code -eq 0) ('exit=' + $code)
         Assert 'g ignored old crash logs' ($log -match 'new-crash-logs=0') ''
-        Assert 'g certified last-good' (Test-Path -LiteralPath (Join-Path $d 'snap\last-good')) ''
+        AssertW 'g certified last-good' (Test-Path -LiteralPath (Join-Path $d 'snap\last-good')) ''
         Stop-FreshProcess $proc
     }
 
@@ -428,8 +464,8 @@ $cases = [ordered]@{
         $code = Invoke-Watchdog -Dir $d
         $log = Get-WatchdogLog $d
         Assert 'n3 exit 0' ($code -eq 0) ('exit=' + $code)
-        Assert 'n3 certified' ($log -match 'OK: refreshed last-good') ''
-        Assert 'n3 cleared hang streak' (-not (Test-Path -LiteralPath (Join-Path $d 'snap\hang-streak.json'))) ''
+        AssertW 'n3 certified' ($log -match 'OK: refreshed last-good') ''
+        AssertW 'n3 cleared hang streak' (-not (Test-Path -LiteralPath (Join-Path $d 'snap\hang-streak.json'))) ''
         Stop-FreshProcess $proc
     }
 
@@ -533,7 +569,10 @@ foreach ($name in $cases.Keys) {
 }
 
 Write-Host ''
-Write-Host ('passed: ' + $script:Passed + '   failed: ' + $script:Failed) -ForegroundColor Cyan
+Write-Host ('passed: ' + $script:Passed + '   failed: ' + $script:Failed + '   skipped: ' + $script:Skipped) -ForegroundColor Cyan
+if ($script:Skipped -gt 0) {
+    Write-Host 'skipped assertions need a real window (run this suite from a normal desktop PowerShell to verify them)' -ForegroundColor Yellow
+}
 if ($script:Failed -gt 0) {
     Write-Host 'failures:' -ForegroundColor Red
     foreach ($f in $script:Failures) { Write-Host ('  - ' + $f) -ForegroundColor Red }
