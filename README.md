@@ -108,7 +108,8 @@ WaitSeconds=20
 | `start-dsh.vbs` | 双击入口。先跑 cookie 体检，再起 exe，最后隐藏起看门狗 |
 | `watchdog.ps1` | 快照、判定、回滚 |
 | `preflight.ps1` | 启动前的 cookie 体检（只在 exe 起来之前读得到那个库） |
-| `test.ps1` | 回归测试：11 组用例、41 条断言，改完跑一遍 |
+| `test.ps1` | 回归测试：18 组用例、65 条断言，改完跑一遍 |
+| `restore.ps1` | 手动把某一份快照恢复到 profile（`last-good` / 任意 `pre-boot-*` / 绝对路径） |
 | `config.ini` | 由 install.ps1 生成，可手改 |
 | `assets/logo.ico` | 快捷方式图标（install.ps1 优先用它） |
 | `assets/logo.png` | 仓库头像 / 文档用图（`assets/make-logo.py` 用 Pillow 生成） |
@@ -170,7 +171,7 @@ startup: 12 s (window visible)
 
 - 数的是 `dsh-auth-*` 的条数（优先用 node 读 sqlite，**精确计数需要 Node 22+**；没有 node 就退回字节扫描，只判量级）
 - 需要清理时会先备份 `Cookies.bak-<时间戳>`；读不到 sqlite（没 node / 库拒绝）时**兜底整个删掉 `Cookies` 文件**，Chromium 下次启动会重建，代价只是重新登录一次
-- 超过 `-WarnCount`（默认 15）→ 提示一次，不动手
+- 超过 `-WarnCount`（默认 15）→ 提示，不动手；**每天最多提示一次，或条数比上次提示时多涨 10 条以上**（`logs\preflight-state.json` 记着上次的日期与条数）
 - 超过 `-CleanCount`（默认 30）→ 弹确认框，点「是」才先备份 `Cookies.bak-<时间戳>` 再清理
 
 它**从不自动清**（那会把人踢下线），也不会阻塞启动：任何异常都只是写一行日志。
@@ -211,9 +212,9 @@ $ps5 = "C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
 & $ps5 -NoProfile -ExecutionPolicy Bypass -File .\test.ps1
 ```
 
-- 11 组用例、41 条断言，全过退出码 `0`，有一条红就 `1`
+- 18 组用例、65 条断言，全过退出码 `0`，有一条红就 `1`
 - 每组都在 `%TEMP%\dsh-guard-test-<时间戳>\` 下造独立沙箱（自带一份 profile 副本），**不碰 `~\.dsh`、不碰真实 `last-good`**，全程 `-NoNotice` 不弹框
-- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 卡死计数不被健康路径误清
+- 覆盖：健康认证 / 无窗口卡死（含连续两次）/ 崩溃回滚 / 认证失败 / profile 缺失 fail-open / 修剪 / 历史日志不误判 / 新日志能识别 / 同名日志被重写 / 锁被占用 / 锁已过期 / 卡死计数不被健康路径误清 / **回滚前先释放锁**（含日志顺序断言）/ `restore.ps1` 的恢复、拒绝、找不到、列表、`-Prune`
 - 可选参数：`-Filter g` 只跑名字含 g 的用例，`-Keep` 保留沙箱供排查
 
 ## 卸载

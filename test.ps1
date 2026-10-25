@@ -23,11 +23,13 @@ $ErrorActionPreference = 'Stop'
 
 $Here     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Watchdog = Join-Path $Here 'watchdog.ps1'
+$Restore  = Join-Path $Here 'restore.ps1'
 $Ps51     = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $RealProfile = Join-Path $env:USERPROFILE '.dsh\profiles\desktop'
 
 if (-not (Test-Path -LiteralPath $Watchdog)) { throw "watchdog.ps1 not found next to test.ps1: $Watchdog" }
 if (-not (Test-Path -LiteralPath $Ps51))     { throw "Windows PowerShell 5.1 not found: $Ps51" }
+if (-not (Test-Path -LiteralPath $Restore))    { throw "restore.ps1 not found next to test.ps1: $Restore" }
 if (-not (Test-Path -LiteralPath $RealProfile)) { throw "profile not found: $RealProfile" }
 if (-not $WorkRoot) { $WorkRoot = Join-Path $env:TEMP ('dsh-guard-test-' + (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 if (Test-Path -LiteralPath $WorkRoot) { Remove-Item -LiteralPath $WorkRoot -Recurse -Force }
@@ -109,6 +111,26 @@ function Invoke-Watchdog {
     return $LASTEXITCODE
 }
 
+function Invoke-Restore {
+    param(
+        [string]$Dir,
+        [hashtable]$Extra = @{},
+        [string]$ProcessName = 'testR-none'
+    )
+    $a = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $Restore,
+        '-ProfileDir',   (Join-Path $Dir 'profile'),
+        '-SnapshotRoot', (Join-Path $Dir 'snap'),
+        '-ProcessName',  $ProcessName,
+        '-ConfigFile',   (Join-Path $Dir 'no-such-config.ini')
+    )
+    foreach ($k in $Extra.Keys) {
+        $a += ('-' + $k)
+        if ($Extra[$k] -ne $true) { $a += [string]$Extra[$k] }
+    }
+    $out = & $Ps51 @a 2>$null
+    return @{ code = $LASTEXITCODE; out = (($out | Out-String).Trim()) }
+}
 function Get-WatchdogLog([string]$Dir) {
     $f = Get-ChildItem -LiteralPath (Join-Path $Dir 'logs') -Filter 'watchdog-*.log' -ErrorAction SilentlyContinue |
          Sort-Object LastWriteTime | Select-Object -Last 1
@@ -155,6 +177,11 @@ $cases = [ordered]@{
         Assert 'c exit 1' ($code -eq 1) ('exit=' + $code)
         Assert 'c restored 6 files' ($log -match 'restored 6 config file') ''
         Assert 'c pre-rollback saved' ((Count-Dirs (Join-Path $d 'snap') 'pre-rollback-*') -ge 1) ''
+        # B2：锁必须在重启之前释放，否则新实例的看门狗看到旧锁会直接 SKIP
+        $iRel = $log.IndexOf('released lock before relaunch')
+        $iEnd = $log.IndexOf('=== watchdog end (rolled back) ===')
+        Assert 'c released lock before relaunch' (($iRel -ge 0) -and ($iEnd -gt $iRel)) ('rel=' + $iRel + ' end=' + $iEnd)
+        Assert 'c wrote lock release' ($log -match 'released lock before relaunch') ''
         Stop-FreshProcess $proc
     }
 
@@ -167,6 +194,7 @@ $cases = [ordered]@{
         Assert 'd exit 2' ($code -eq 2) ('exit=' + $code)
         Assert 'd reported AUTH-FAIL' ($log -match 'AUTH-FAIL') ''
         Assert 'd did not roll back' ((Count-Dirs (Join-Path $d 'snap') 'pre-rollback-*') -eq 0) ''
+        Assert 'd released lock before notice' ($log -match 'released lock before notice') ''
         Stop-FreshProcess $proc
     }
 
@@ -318,6 +346,78 @@ $cases = [ordered]@{
         Assert 'n3 certified' ($log -match 'OK: refreshed last-good') ''
         Assert 'n3 cleared hang streak' (-not (Test-Path -LiteralPath (Join-Path $d 'snap\hang-streak.json'))) ''
         Stop-FreshProcess $proc
+    }
+
+    'r1-restore-ok' = {
+        $d = New-Case 'r1-restore-ok'
+        $good = Join-Path $d 'snap\last-good'
+        New-Item -ItemType Directory -Path $good -Force | Out-Null
+        foreach ($f in 'package.json', 'cordis.patch.yml', 'cordis.yml') {
+            Set-Content -LiteralPath (Join-Path $good $f) -Value ('GOOD:' + $f) -Encoding UTF8
+        }
+        $r = Invoke-Restore -Dir $d -Extra @{ From = 'last-good' }
+        Assert 'r1 exit 0' ($r.code -eq 0) ('exit=' + $r.code + ' out=' + $r.out)
+        $pkg = Get-Content -LiteralPath (Join-Path $d 'profile\package.json') -Raw
+        Assert 'r1 copied package.json' ($pkg -match 'GOOD:package.json') ''
+        Assert 'r1 copied cordis.patch.yml' ((Get-Content -LiteralPath (Join-Path $d 'profile\cordis.patch.yml') -Raw) -match 'GOOD:cordis') ''
+        # 快照里没有的文件必须原样保留
+        Assert 'r1 kept file the snapshot lacks' (Test-Path -LiteralPath (Join-Path $d 'profile\pnpm-lock.yaml')) ''
+        Assert 'r1 reported the missing file' ($r.out -match 'not in snapshot') ''
+        Assert 'r1 saved pre-restore backup' ((Count-Dirs (Join-Path $d 'snap') 'pre-restore-*') -eq 1) ''
+        Assert 'r1 backup has the real content' ((Get-Content -LiteralPath ((Get-ChildItem -LiteralPath (Join-Path $d 'snap') -Directory -Filter 'pre-restore-*' | Select-Object -First 1).FullName + '\package.json') -Raw) -notmatch 'GOOD:') ''
+    }
+
+    'r2-refuse-running' = {
+        $d = New-Case 'r2-refuse-running'
+        $good = Join-Path $d 'snap\last-good'
+        New-Item -ItemType Directory -Path $good -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $good 'package.json') -Value 'GOOD:refused' -Encoding UTF8
+        $before = (Get-Item -LiteralPath (Join-Path $d 'profile\package.json')).Length
+        $proc = New-FreshProcess 'testR2'
+        Start-Sleep -Seconds 2
+        $r = Invoke-Restore -Dir $d -Extra @{ From = 'last-good' } -ProcessName 'cmd'
+        Assert 'r2 exit 2' ($r.code -eq 2) ('exit=' + $r.code + ' out=' + $r.out)
+        Assert 'r2 refused in words' ($r.out -match 'REFUSED') ''
+        Assert 'r2 nothing changed' ((Get-Content -LiteralPath (Join-Path $d 'profile\package.json') -Raw) -notmatch 'GOOD:refused') ''
+        Assert 'r2 no pre-restore backup' ((Count-Dirs (Join-Path $d 'snap') 'pre-restore-*') -eq 0) ''
+        Stop-FreshProcess $proc
+    }
+
+    'r3-not-found' = {
+        $d = New-Case 'r3-not-found'
+        $r = Invoke-Restore -Dir $d -Extra @{ From = 'no-such-snapshot' }
+        Assert 'r3 exit 3' ($r.code -eq 3) ('exit=' + $r.code)
+        Assert 'r3 says not found' ($r.out -match 'snapshot not found') ''
+    }
+
+    'r4-list' = {
+        $d = New-Case 'r4-list'
+        $good = Join-Path $d 'snap\last-good'
+        New-Item -ItemType Directory -Path $good -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $good 'package.json') -Value '{}' -Encoding UTF8
+        $pre = Join-Path $d 'snap\pre-boot-20260101-000000'
+        New-Item -ItemType Directory -Path $pre -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $pre 'package.json') -Value '{}' -Encoding UTF8
+        $r = Invoke-Restore -Dir $d -Extra @{ List = $true }
+        Assert 'r4 exit 0' ($r.code -eq 0) ('exit=' + $r.code)
+        Assert 'r4 lists last-good' ($r.out -match 'last-good') ''
+        Assert 'r4 lists pre-boot' ($r.out -match 'pre-boot-') ''
+        Assert 'r4 marks rollback target' ($r.out -match 'rollback target') ''
+    }
+
+    'r5-prune' = {
+        $d = New-Case 'r5-prune'
+        $good = Join-Path $d 'snap\last-good'
+        New-Item -ItemType Directory -Path $good -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $good 'package.json') -Value 'GOOD:prune' -Encoding UTF8
+        $r = Invoke-Restore -Dir $d -Extra @{ From = 'last-good'; Prune = $true }
+        Assert 'r5 exit 0' ($r.code -eq 0) ('exit=' + $r.code + ' out=' + $r.out)
+        Assert 'r5 pruned managed files' ($r.out -match 'will delete \(managed names only\)') ''
+        Assert 'r5 removed compatibility.json' (-not (Test-Path -LiteralPath (Join-Path $d 'profile\compatibility.json'))) ''
+        # 非受管文件绝不能动
+        Set-Content -LiteralPath (Join-Path $d 'profile\keep-me.txt') -Value 'x' -Encoding UTF8
+        $null = Invoke-Restore -Dir $d -Extra @{ From = 'last-good'; Prune = $true }
+        Assert 'r5 kept unmanaged file' (Test-Path -LiteralPath (Join-Path $d 'profile\keep-me.txt')) ''
     }
 }
 

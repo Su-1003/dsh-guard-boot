@@ -238,10 +238,12 @@ function Get-StartupSeconds {
 }
 
 function Show-Notice {
-    param([string]$text, [int]$icon)
+    param([string]$text, [int]$icon, [int]$Seconds = 60)
     try {
+        # 先把要说的写进日志：弹窗可能没人看见，日志一定会留下
+        Write-Log ('notice: ' + (($text -split "`r`n")[0]) + ' (seconds=' + $Seconds + ')')
         $w = New-Object -ComObject WScript.Shell
-        [void]$w.Popup($text, 25, 'DSH guard boot', $icon)
+        [void]$w.Popup($text, $Seconds, 'DSH guard boot', $icon)
     } catch {}
 }
 
@@ -400,7 +402,7 @@ try {
             [System.IO.File]::WriteAllText($HangFile, $hangJson, (New-Object System.Text.UTF8Encoding($false)))
             Write-Log ('HANG: no window again (streak ' + $hang + ')')
             if ($hang -ge 2 -and -not $NoNotice) {
-                Show-Notice ("DSH 已经连续 " + $hang + " 次「进程起来了、但窗口一直没出现」。`r`n`r`n可能是真卡死，也可能只是启动很慢（超过 " + $StartupWatchSeconds + " 秒还没出窗口）。`r`n`r`n建议：先再等一会儿看窗口会不会出来；始终不出来就完全退出 DSH 再启动一次。`r`n`r`n日志: " + $logFile) 48
+                Show-Notice ("DSH 已经连续 " + $hang + " 次「进程起来了、但窗口一直没出现」。`r`n`r`n可能是真卡死，也可能只是启动很慢（超过 " + $StartupWatchSeconds + " 秒还没出窗口）。`r`n`r`n建议：先再等一会儿看窗口会不会出来；始终不出来就完全退出 DSH 再启动一次。`r`n`r`n日志: " + $logFile) 48 60
             }
         } else {
             Write-Log ('SKIP: no fresh process named "' + $ProcessName + '" - not certifying this config as last-good')
@@ -454,8 +456,11 @@ try {
     if ($authFail) {
         $cookieDir = Join-Path $env:APPDATA '@deepseek-ai\dsh-desktop\Network'
         Write-Log 'AUTH-FAIL: "Web authentication failed" -> cookie store, not config. Nothing rolled back.'
+        # 弹窗要停到人点掉，所以先把锁放了，否则下次启动会被这把锁挡住
+        Release-Lock
+        Write-Log 'released lock before notice'
         if (-not $NoNotice) {
-            Show-Notice ("DSH 启动失败：认证失败（Web authentication failed）。`r`n`r`n这不是配置问题，所以没有回滚、也没有重启。`r`n`r`n处理办法：`r`n1. 先完全退出 DSH`r`n2. 删除这个目录里的 Cookies 文件`r`n   " + $cookieDir + "`r`n   （只删 Cookies 这一个，重启会自动重建）`r`n3. 再从桌面图标启动`r`n`r`n日志: " + $logFile) 48
+            Show-Notice ("DSH 启动失败：认证失败（Web authentication failed）。`r`n`r`n这不是配置问题，所以没有回滚、也没有重启。`r`n`r`n处理办法：`r`n1. 先完全退出 DSH`r`n2. 删除这个目录里的 Cookies 文件`r`n   " + $cookieDir + "`r`n   （只删 Cookies 这一个，重启会自动重建）`r`n3. 再从桌面图标启动`r`n`r`n日志: " + $logFile) 48 0
         }
         Prune-OldSnapshots
         Write-Log '=== watchdog end (auth-fail, nothing rolled back) ==='
@@ -465,8 +470,10 @@ try {
     # 同一个指纹已经回滚过一次还这样：再来一轮也救不回来，停下来把原因交给人
     if ($streak -ge $StopAfterStreak) {
         Write-Log ('STOP: same failure ' + $streak + ' times in a row - another rollback would not help')
+        Release-Lock
+        Write-Log 'released lock before notice'
         if (-not $NoNotice) {
-            Show-Notice ("DSH 连续 " + $streak + " 次以同样的方式启动失败：`r`n" + $fingerprint + "`r`n`r`n上次已经回滚过配置，仍然如此，所以这次不再回滚、也不再重启。`r`n`r`n看门狗日志: " + $logFile + "`r`n崩溃日志: " + $newLogs[0].Name) 48
+            Show-Notice ("DSH 连续 " + $streak + " 次以同样的方式启动失败：`r`n" + $fingerprint + "`r`n`r`n上次已经回滚过配置，仍然如此，所以这次不再回滚、也不再重启。`r`n`r`n看门狗日志: " + $logFile + "`r`n崩溃日志: " + $newLogs[0].Name) 48 0
         }
         Prune-OldSnapshots
         Write-Log '=== watchdog end (stopped after repeated failure) ==='
@@ -503,6 +510,11 @@ try {
     $n = Restore-ConfigSnapshot -src $restoreFrom -dst $ProfileDir
     Write-Log ('restored ' + $n + ' config file(s) from ' + $restoreFrom)
 
+    # 必须重启前先放锁：新实例的看门狗看到这把握着旧 pid 的锁会直接 SKIP，
+    # 等于「回滚重启出来的那个实例没有守护」。这个 bug 在 r3 到 b2 之间一直存在。
+    Release-Lock
+    Write-Log 'released lock before relaunch'
+
     if (-not $NoRelaunch) {
         # 必须走 start-dsh.vbs 重启，否则新实例没有看门狗（断链）；第 3 条会拦住无休止的重启
         $vbs = Join-Path $ScriptDir 'start-dsh.vbs'
@@ -519,7 +531,7 @@ try {
     }
 
     if (-not $NoNotice) {
-        Show-Notice ("DSH failed to start. Config rolled back and relaunched.`n`nCrash log: " + ($newLogs[0].Name) + "`nRestored from: " + $restoreFrom + "`nCurrent profile saved to: " + $preRollback + "`n`nDetails: " + $logFile) 48
+        Show-Notice ("DSH 启动失败，已回滚配置并重新启动。`r`n`r`n崩溃日志：" + ($newLogs[0].Name) + "`r`n恢复到：" + $restoreFrom + "`r`n坏掉的那份已另存：" + $preRollback + "`r`n`r`n详情见：" + $logFile) 48 0
     }
     Prune-OldSnapshots
     Write-Log '=== watchdog end (rolled back) ==='

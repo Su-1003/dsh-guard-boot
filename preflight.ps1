@@ -15,7 +15,9 @@ param(
     [int]$WarnCount     = 15,
     [int]$CleanCount    = 30,
     [switch]$Quiet,
-    [string]$LogDir     = ''
+    [string]$LogDir     = '',
+    [int]$RemindGap     = 10,
+    [string]$StateFile  = ''
 )
 
 $ErrorActionPreference = 'Continue'
@@ -27,6 +29,7 @@ if ([string]::IsNullOrWhiteSpace($CookieDir)) {
     $CookieDir = Join-Path $env:APPDATA '@deepseek-ai\dsh-desktop\Network'
 }
 if ([string]::IsNullOrWhiteSpace($LogDir)) { $LogDir = Join-Path $ScriptDir 'logs' }
+if ([string]::IsNullOrWhiteSpace($StateFile)) { $StateFile = Join-Path $LogDir 'preflight-state.json' }
 
 function Write-PLog {
     param([string]$msg)
@@ -163,8 +166,30 @@ try {
     }
 
     if (-not $Quiet) {
-        Show-Popup ("DSH 的认证 cookie 已经有 " + $count + " 条（提示线 " + $WarnCount + "）。`r`n`r`n" +
-                    "还不用清理，但如果启动开始报 `"Web authentication failed`"，`r`n就是它了。") 48 20 | Out-Null
+        # 只在「今天还没提醒过」或「比上次提醒时多涨了 RemindGap 条」时弹窗，
+        # 否则每次都弹会让人把提示当背景噪音，而且它会阻塞启动（vbs 是同步等待）。
+        $today = (Get-Date).ToString('yyyy-MM-dd')
+        $lastDate = ''
+        $lastCount = -1
+        if (Test-Path -LiteralPath $StateFile) {
+            try {
+                $st = Get-Content -LiteralPath $StateFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+                if ($st) { $lastDate = [string]$st.date; $lastCount = [int]$st.count }
+            } catch {}
+        }
+        $shouldShow = ($lastDate -ne $today) -or ($lastCount -lt 0) -or ($count -ge ($lastCount + $RemindGap))
+        if ($shouldShow) {
+            Show-Popup ("DSH 的认证 cookie 已经有 " + $count + " 条（提示线 " + $WarnCount + "）。`r`n`r`n" +
+                        "还不用清理，但如果启动开始报 `"Web authentication failed`"，`r`n就是它了。`r`n`r`n" +
+                        "（今天只会提示这一次，条数涨到 " + ($count + $RemindGap) + " 条以上会再提醒）") 48 10 | Out-Null
+            try {
+                $j = @{ date = $today; count = $count; at = (Get-Date).ToString('o') } | ConvertTo-Json -Compress
+                [System.IO.File]::WriteAllText($StateFile, $j, (New-Object System.Text.UTF8Encoding($false)))
+                Write-PLog ('warned and state updated (' + $count + ')')
+            } catch {}
+        } else {
+            Write-PLog ('warn throttled (already warned today at ' + $lastCount + ', now ' + $count + ', gap ' + $RemindGap + ')')
+        }
     }
     exit 0
 }
